@@ -9,7 +9,7 @@
 
 obj-m += xv6fs.o
 
-xv6fs-objs := xv6fs.c super.c inode.c dir.c file.c
+xv6fs-objs := xv6fs_main.o super.o inode.o dir.o file.o
 
 # Default: build against the currently running kernel
 KDIR ?= /lib/modules/$(shell uname -r)/build
