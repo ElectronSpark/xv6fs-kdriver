@@ -9,3 +9,6 @@
 Module.symvers
 modules.order
 modules.builtin
+
+# Kbuild hidden command files
+.*.cmd

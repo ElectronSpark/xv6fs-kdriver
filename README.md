@@ -56,37 +56,57 @@ xv6fs-kdriver/
 
 ## Prerequisites
 
-Install the kernel headers and build tools for your **running** kernel:
+Install the build tools:
 
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential linux-headers-$(uname -r)
+sudo apt-get install build-essential dwarves libelf-dev libssl-dev bc flex bison
+```
+
+On a **native Linux** system (VM or dual-boot), also install the kernel
+headers:
+
+```bash
+sudo apt-get install linux-headers-$(uname -r)
 ```
 
 > **WSL2 note:** WSL2 uses a Microsoft-supplied kernel.  The standard
-> `linux-headers-$(uname -r)` package may not exist.  You have two options:
+> `linux-headers-$(uname -r)` package does not exist.  You must build the
+> WSL2 kernel from source:
 >
-> **Option A — build inside a native Linux VM / dual-boot:**
-> The simplest and most reliable approach for kernel module development.
->
-> **Option B — build the WSL2 kernel from source:**
 > ```bash
 > # 1. Clone the Microsoft WSL2 kernel
 > git clone --depth=1 https://github.com/microsoft/WSL2-Linux-Kernel.git
 > cd WSL2-Linux-Kernel
 >
-> # 2. Build it (use the WSL2 config as a starting point)
-> cp Microsoft/config-wsl .config
-> make -j$(nproc) KCONFIG_CONFIG=.config
+> # 2. Check out the tag that matches your running kernel
+> #    (find it with: uname -r)
+> git fetch --depth=1 origin tag linux-msft-wsl-$(uname -r | sed 's/-microsoft-standard-WSL2//')
+> git checkout linux-msft-wsl-$(uname -r | sed 's/-microsoft-standard-WSL2//')
 >
-> # 3. Point the Makefile at this tree
-> make -C /path/to/xv6fs-kdriver KDIR=$(pwd)
+> # 3. Configure and do a full build (needed for Module.symvers)
+> cp Microsoft/config-wsl .config
+> make olddefconfig
+> make -j$(nproc)
+>
+> # 4. Create a symlink so the default KDIR works without extra flags
+> sudo mkdir -p /lib/modules/$(uname -r)
+> sudo ln -s $(pwd) /lib/modules/$(uname -r)/build
 > ```
+>
+> With the symlink in place, `make`, `make clean`, etc. work without
+> passing `KDIR=...`.  Alternatively, pass it explicitly each time:
+> `make KDIR=/path/to/WSL2-Linux-Kernel`.
+>
+> **Important:** A full kernel build (not just `make modules_prepare`) is
+> required so that `Module.symvers` is populated with all exported symbols.
+> The kernel source version must exactly match `uname -r`, otherwise
+> `insmod` will reject the module with "Invalid module format".
 
 The module targets kernel **5.19 or later** (uses the folio-based page-cache
-API).  It has been tested on Ubuntu 22.04 HWE (5.19+) and Ubuntu 24.04
-(6.8).  See [XV6 FS Limitations](#xv6-fs-limitations) for API compatibility
-notes.
+API).  It has been tested on Ubuntu 22.04 HWE (5.19+), Ubuntu 24.04 (6.8),
+and WSL2 (6.6).  See [XV6 FS Limitations](#xv6-fs-limitations) for API
+compatibility notes.
 
 ---
 
@@ -137,9 +157,13 @@ to use the `mkfs` utility from the [xv6 source](https://github.com/mit-pdos/xv6-
 
 ```bash
 # 1. Clone xv6 and build its mkfs tool
-git clone https://github.com/mit-pdos/xv6-public.git
+git clone --depth=1 https://github.com/mit-pdos/xv6-public.git
 cd xv6-public
-make fs.img       # produces fs.img (an XV6-formatted disk image)
+gcc -Wall -o mkfs mkfs.c    # only build mkfs (full xv6 build may fail on modern GCC)
+
+# 2. Create a test image with sample files
+echo "Hello from xv6fs" > testfile
+./mkfs /tmp/xv6test.img testfile
 cd ..
 ```
 
@@ -147,8 +171,8 @@ Then mount it (once the driver is functional enough to mount):
 
 ```bash
 # Attach the image to a loop device
-sudo losetup -fP xv6-public/fs.img
-LOOP=$(losetup -j xv6-public/fs.img | cut -d: -f1)
+sudo losetup -fP /tmp/xv6test.img
+LOOP=$(losetup -j /tmp/xv6test.img | cut -d: -f1)
 
 # Create a mount point and mount
 sudo mkdir -p /mnt/xv6
