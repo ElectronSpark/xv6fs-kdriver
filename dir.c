@@ -71,55 +71,44 @@ static int xv6fs_readdir(struct file *file, struct dir_context *ctx)
 {
 	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
-	struct xv6fs_inode_info *ei = xv6fs_i(inode);
 	unsigned int pos = ctx->pos;
 	unsigned int size = inode->i_size;
-	struct buffer_head *ind_bh = NULL;
-	__le32 *ind_data = NULL;
 
 	if (pos >= size)
 		return 0;
 
-	/* Pre-read the indirect block if needed */
-	if (ei->addrs[XV6FS_NDIRECT] && size > XV6FS_NDIRECT * XV6FS_BSIZE) {
-		ind_bh = sb_bread(sb, ei->addrs[XV6FS_NDIRECT]);
-		if (!ind_bh)
-			return -EIO;
-		ind_data = (__le32 *)ind_bh->b_data;
-	}
-
 	for (; pos < size; pos += sizeof(struct xv6fs_dirent)) {
 		unsigned int blk_idx = pos / XV6FS_BSIZE;
 		unsigned int blk_off = pos % XV6FS_BSIZE;
-		__u32 phys;
+		struct buffer_head map_bh;
+		struct buffer_head *bh;
+		struct xv6fs_dirent *de;
+		__u16 inum;
+		int err;
 
-		/* Map logical block to physical */
-		if (blk_idx < XV6FS_NDIRECT) {
-			phys = ei->addrs[blk_idx];
-		} else if (ind_data) {
-			phys = le32_to_cpu(ind_data[blk_idx - XV6FS_NDIRECT]);
-		} else {
-			break;
-		}
-
-		if (phys == 0)
+		/* Map logical block to physical via get_block */
+		memset(&map_bh, 0, sizeof(map_bh));
+		map_bh.b_size = XV6FS_BSIZE;
+		err = xv6fs_get_block(inode, blk_idx, &map_bh, 0);
+		if (err)
+			return err;
+		if (!buffer_mapped(&map_bh)) {
+			pos += XV6FS_BSIZE - sizeof(struct xv6fs_dirent);
 			continue;
-
-		struct buffer_head *bh = sb_bread(sb, phys);
-		if (!bh) {
-			brelse(ind_bh);
-			return -EIO;
 		}
 
-		struct xv6fs_dirent *de = (struct xv6fs_dirent *)(bh->b_data + blk_off);
-		__u16 inum = le16_to_cpu(de->inum);
+		bh = sb_bread(sb, map_bh.b_blocknr);
+		if (!bh)
+			return -EIO;
+
+		de = (struct xv6fs_dirent *)(bh->b_data + blk_off);
+		inum = le16_to_cpu(de->inum);
 
 		if (inum != 0) {
 			unsigned int namelen = strnlen(de->name, XV6FS_DIRSIZ);
 
 			if (!dir_emit(ctx, de->name, namelen, inum, DT_UNKNOWN)) {
 				brelse(bh);
-				brelse(ind_bh);
 				return 0;
 			}
 		}
@@ -128,7 +117,6 @@ static int xv6fs_readdir(struct file *file, struct dir_context *ctx)
 		ctx->pos = pos + sizeof(struct xv6fs_dirent);
 	}
 
-	brelse(ind_bh);
 	return 0;
 }
 
@@ -173,8 +161,61 @@ static int xv6fs_readdir(struct file *file, struct dir_context *ctx)
 static struct dentry *xv6fs_lookup(struct inode *dir, struct dentry *dentry,
 				   unsigned int flags)
 {
-	/* TODO (stage 3) */
-	return ERR_PTR(-ENOENT);
+	struct super_block *sb = dir->i_sb;
+	struct buffer_head *bh = NULL;
+	struct buffer_head map_bh;
+	struct xv6fs_dirent *de;
+	__u16 inum;
+	int err;
+
+	if (dentry->d_name.len > XV6FS_DIRSIZ)
+		return ERR_PTR(-ENAMETOOLONG);
+	
+	for (__u32 pos = 0; pos < dir->i_size; pos += sizeof(struct xv6fs_dirent)) {
+		if (pos % XV6FS_BSIZE == 0) {
+			// We have reached a new block
+			if (bh) {
+				brelse(bh);
+				bh = NULL;
+			}
+
+			__u32 blk_idx = pos / XV6FS_BSIZE;
+			memset(&map_bh, 0, sizeof(map_bh));
+			map_bh.b_size = XV6FS_BSIZE;
+			err = xv6fs_get_block(dir, blk_idx, &map_bh, 0);
+			if (err)
+				return ERR_PTR(err);
+			if (!buffer_mapped(&map_bh)) {
+				pos += XV6FS_BSIZE - sizeof(struct xv6fs_dirent);
+				continue;
+			}
+			bh = sb_bread(sb, map_bh.b_blocknr);
+			if (!bh) {
+				return ERR_PTR(-EIO);
+			}
+		}
+
+		int blk_off = pos % XV6FS_BSIZE;
+		de = (struct xv6fs_dirent *)(bh->b_data + blk_off);
+		inum = le16_to_cpu(de->inum);
+
+		unsigned int namelen = strnlen(de->name, XV6FS_DIRSIZ);
+
+		if (inum != 0 && namelen == dentry->d_name.len &&
+		    strncmp(de->name, dentry->d_name.name, namelen) == 0) {
+			struct inode *inode = xv6fs_iget(sb, inum);
+			brelse(bh);
+			return d_splice_alias(inode, dentry);
+		}
+
+	}
+
+	if (bh) {
+		brelse(bh);
+		bh = NULL;
+	}
+
+	return d_splice_alias(NULL, dentry);
 }
 
 /* ------------------------------------------------------------------

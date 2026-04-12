@@ -78,7 +78,17 @@ static void xv6fs_put_super(struct super_block *sb)
  * ---------------------------------------------------------------- */
 static int xv6fs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
-	/* TODO (stage 1) */
+	struct super_block *sb = dentry->d_sb;
+	struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
+	buf->f_type = sbi->raw_sb.magic;
+	buf->f_bsize = XV6FS_BSIZE;
+	buf->f_blocks = sbi->raw_sb.nblocks;
+	buf->f_bfree = 0;
+	buf->f_bavail = 0;
+	buf->f_files = sbi->raw_sb.ninodes;
+	buf->f_ffree = 0;
+	buf->f_namelen = XV6FS_DIRSIZ;
+	buf->f_flags = ST_NOATIME | ST_NODIRATIME | ST_NOEXEC | ST_NOSUID | ST_RDONLY;
 	return 0;
 }
 
