@@ -12,3 +12,11 @@ modules.builtin
 
 # Kbuild hidden command files
 .*.cmd
+
+# IntelliSense (generated; rebuild with make + gen_compile_commands.py)
+compile_commands.json
+
+# Userspace mkfs binary
+mkfs.xv6fs
+
+*.img

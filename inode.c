@@ -141,9 +141,11 @@ const struct inode_operations xv6fs_file_inode_ops = {
  *      b. Index into the block:
  *         raw = (struct xv6fs_dinode *)bh->b_data + (ino % XV6FS_IPB)
  *      c. Copy fields into the VFS inode and xv6fs_inode_info:
- *           - set ei->i_type, ei->i_major, ei->i_minor
+ *           - set ei->i_type, ei->i_major, ei->i_minor  (le16_to_cpu)
  *           - copy ei->addrs[] (converting le32_to_cpu)
- *           - set inode->i_size, set_nlink(), inode->i_uid/gid (fake root)
+ *           - set inode->i_size (le32_to_cpu), set_nlink() (le16_to_cpu)
+ *           - set inode->i_blocks = (inode->i_size + 511) / 512
+ *           - set inode->i_uid/gid (fake root)
  *           - XV6FS_ZERO_CTIME(inode); inode->i_atime = inode->i_mtime = …
  *           - switch on ei->i_type to set inode->i_mode, ->i_op, ->i_fop
  *             and (for files) inode->i_mapping->a_ops = &xv6fs_aops
@@ -181,12 +183,15 @@ struct inode *xv6fs_iget(struct super_block *sb, unsigned long ino)
  * Steps to follow:
  *   Direct blocks (iblock < XV6FS_NDIRECT):
  *     disk_block = ei->addrs[iblock]
+ *     (addrs[] is already host-endian, converted in xv6fs_iget)
  *
  *   Indirect block (iblock >= XV6FS_NDIRECT):
  *     idx        = iblock - XV6FS_NDIRECT
  *     Return -EFBIG if idx >= XV6FS_NINDIRECT.
  *     indirect_bh = sb_bread(sb, ei->addrs[XV6FS_NDIRECT])
- *     disk_block  = ((__u32 *)indirect_bh->b_data)[idx]   (le32_to_cpu)
+ *     disk_block  = le32_to_cpu(((__le32 *)indirect_bh->b_data)[idx])
+ *     NOTE: indirect block data is raw on-disk (__le32), unlike
+ *     ei->addrs[] which is already host-endian.
  *     brelse(indirect_bh)
  *
  *   If disk_block == 0 and @create == 0 → the block is a hole; return 0

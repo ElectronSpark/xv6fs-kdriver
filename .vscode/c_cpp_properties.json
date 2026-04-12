@@ -1,0 +1,10 @@
+{
+    "configurations": [
+        {
+            "name": "Kernel Module",
+            "compileCommands": "${workspaceFolder}/compile_commands.json",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}

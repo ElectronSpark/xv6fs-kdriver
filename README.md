@@ -42,12 +42,14 @@ All on-disk integers are **little-endian** 16- or 32-bit values.
 
 ```
 xv6fs-kdriver/
-├── Makefile      — build rules (targets: all, clean, load, unload)
-├── xv6fs.h       — on-disk structs, in-memory types, constants,
-│                   cross-file declarations
-├── xv6fs_main.c  — module init/exit; filesystem type registration
-├── super.c       — superblock operations  (stage 1)
-├── inode.c       — inode cache, block mapping  (stages 2 & 4)
+├── Makefile       — build rules (targets: all, clean, load, unload,
+│                    install-mkfs, uninstall-mkfs)
+├── mkfs.xv6fs.c   — userspace mkfs tool (creates xv6fs images)
+├── xv6fs.h        — on-disk structs, in-memory types, constants,
+│                    cross-file declarations
+├── xv6fs_main.c   — module init/exit; filesystem type registration
+├── super.c        — superblock operations  (stage 1)
+├── inode.c        — inode cache, block mapping  (stages 2 & 4)
 ├── dir.c         — directory readdir & lookup  (stage 3)
 └── file.c        — file read/write operations  (stages 4 & 5)
 ```
@@ -97,6 +99,14 @@ sudo apt-get install linux-headers-$(uname -r)
 > With the symlink in place, `make`, `make clean`, etc. work without
 > passing `KDIR=...`.  Alternatively, pass it explicitly each time:
 > `make KDIR=/path/to/WSL2-Linux-Kernel`.
+>
+> **Note:** WSL2 resets `/lib/modules` on reboot, so the symlink must be
+> recreated after each `wsl --shutdown`.  To automate this, add to
+> `/etc/wsl.conf`:
+> ```ini
+> [boot]
+> command = mkdir -p /lib/modules/$(uname -r) && ln -sf /home/es/reps/WSL2-Linux-Kernel /lib/modules/$(uname -r)/build
+> ```
 >
 > **Important:** A full kernel build (not just `make modules_prepare`) is
 > required so that `Module.symvers` is populated with all exported symbols.
@@ -152,16 +162,57 @@ make clean && make
 
 ## Creating a Test Image
 
-You need an XV6-formatted disk image to test the driver.  The easiest way is
-to use the `mkfs` utility from the [xv6 source](https://github.com/mit-pdos/xv6-public):
+You need an XV6-formatted disk image to test the driver.  You can use the
+included `mkfs.xv6fs` tool:
+
+```bash
+# Build everything (kernel module + mkfs tool)
+make
+
+# Create a test image with sample files
+echo "Hello from xv6fs" > testfile
+./mkfs.xv6fs -s 1000 test.img testfile
+```
+
+To make `mkfs -t xv6fs` work system-wide:
+
+```bash
+sudo make install-mkfs    # installs to /sbin/mkfs.xv6fs
+sudo make uninstall-mkfs  # removes it
+```
+
+**Alternative:** You can also use the `mkfs` utility from the
+[xv6 source](https://github.com/mit-pdos/xv6-public):
 
 ```bash
 # 1. Clone xv6 and build its mkfs tool
 git clone --depth=1 https://github.com/mit-pdos/xv6-public.git
 cd xv6-public
 gcc -Wall -o mkfs mkfs.c    # only build mkfs (full xv6 build may fail on modern GCC)
+cd ..
+```
 
+> **⚠️ Magic number:** Some versions of xv6-public do not include a `magic`
+> field in the superblock.  The driver expects `0x10203040` as the first
+> 4 bytes of block 1.  If your `fs.h` struct starts with `size` instead of
+> `magic`, you must patch it:
+>
+> ```c
+> // In fs.h — add before the size field:
+> #define FSMAGIC 0x10203040
+> struct superblock {
+>   uint magic;        // Must be FSMAGIC    ← ADD THIS
+>   uint size;
+>   // ... rest unchanged
+> };
+>
+> // In mkfs.c — add before sb.size = xint(FSSIZE):
+> sb.magic = xint(FSMAGIC);
+> ```
+
+```bash
 # 2. Create a test image with sample files
+cd xv6-public
 echo "Hello from xv6fs" > testfile
 ./mkfs /tmp/xv6test.img testfile
 cd ..
@@ -210,24 +261,38 @@ The files and functions you need to edit are called out explicitly.
 **Step-by-step for `xv6fs_fill_super`:**
 
 1. `sb_set_blocksize(sb, XV6FS_BSIZE)` — set the 512-byte block size.
-2. `sb_bread(sb, 1)` — read block 1 (the superblock).
+   **⚠️ Returns the block size on success or 0 on failure** (not a negative
+   errno).  Check with `if (!sb_set_blocksize(...))`.
+2. `sb_bread(sb, 1)` — read block 1 (the superblock).  Returns `NULL` on
+   I/O error.
 3. Check `le32_to_cpu(raw->magic) == XV6FS_MAGIC`; return `-EINVAL` if not.
-4. `kzalloc(sizeof(struct xv6fs_sb_info), GFP_KERNEL)` — allocate `sbi`; copy
-   all fields with `le32_to_cpu`; store `bh` in `sbi->bh`; assign
-   `sb->s_fs_info = sbi`.
+4. `kzalloc(sizeof(struct xv6fs_sb_info), GFP_KERNEL)` — allocate `sbi`;
+   copy the raw superblock data into `sbi->raw_sb`.  The `raw_sb` fields
+   remain `__le32` — use `le32_to_cpu()` each time you **read** a field.
+   Store `bh` in `sbi->bh`; assign `sb->s_fs_info = sbi`.
 5. Set `sb->s_magic`, `sb->s_op`, `sb->s_maxbytes`.
-6. `xv6fs_iget(sb, XV6FS_ROOTINO)` — get root inode (implements in stage 2).
-7. `d_make_root(root_inode)` — create the root dentry; assign to `sb->s_root`.
+6. `xv6fs_iget(sb, XV6FS_ROOTINO)` — get root inode (implemented in
+   stage 2).  **⚠️ Returns `ERR_PTR()` on failure** — check with
+   `IS_ERR(root_inode)` and return `PTR_ERR(root_inode)`.
+7. `d_make_root(root_inode)` — create the root dentry; assign to
+   `sb->s_root`.  **⚠️ Returns `NULL` on failure** (and iput's the inode
+   for you) — return `-ENOMEM`.
+
+**Cleanup on failure:** Any error after allocating `sbi` or reading `bh`
+must free those resources and clear `sb->s_fs_info`.  Use `goto` labels
+for cleanup (e.g. `goto out_free_sbi`).  Otherwise you leak memory on
+every failed mount.
 
 **Key APIs** (`#include <linux/buffer_head.h>`, `<linux/slab.h>`):
 
 ```c
-sb_set_blocksize(sb, size);           // set logical block size
-struct buffer_head *bh = sb_bread(sb, block_nr); // read one block
+sb_set_blocksize(sb, size);           // returns size on success, 0 on failure
+struct buffer_head *bh = sb_bread(sb, block_nr); // read one block; NULL on error
 brelse(bh);                           // release when done
 void *sbi = kzalloc(size, GFP_KERNEL);
 le32_to_cpu(val);                     // little-endian to host
-d_make_root(inode);                   // create root dentry
+d_make_root(inode);                   // create root dentry; NULL on failure
+IS_ERR(ptr);                          // check ERR_PTR return values
 ```
 
 ---
@@ -261,6 +326,7 @@ raw += ino % XV6FS_IPB;
 | `type` | `i_mode` (S_IFDIR / S_IFREG / S_IFCHR) | also selects `i_op`, `i_fop` |
 | `nlink` | `set_nlink(inode, n)` | |
 | `size` | `inode->i_size` | |
+| *(derived)* | `inode->i_blocks` | set to `(i_size + 511) / 512` |
 | `major`, `minor` | `init_special_inode(...)` | T_DEV only |
 | *(none)* | `i_uid`, `i_gid` | fake as `make_kuid/kgid(&init_user_ns, 0)` |
 | *(none)* | `i_atime`, `i_mtime`, ctime | fake as zero (XV6 has no timestamps) |
@@ -304,8 +370,6 @@ init_special_inode(inode, mode, MKDEV(major, minor));
 // Emit one directory entry; returns false when the buffer is full
 bool ok = dir_emit(ctx, name, namelen, ino, DT_UNKNOWN);
 
-// Emit "." and ".." automatically (optional convenience)
-dir_emit_dots(file, ctx);
 
 // ctx->pos is the byte offset; advance it after each emitted entry:
 ctx->pos += sizeof(struct xv6fs_dirent);
@@ -313,6 +377,10 @@ ctx->pos += sizeof(struct xv6fs_dirent);
 // In lookup: return the child dentry (or a negative dentry)
 return d_splice_alias(inode, dentry); // inode==NULL → not found
 ```
+
+**Important:** Do **not** use `dir_emit_dots()` — XV6 directories store
+`.` and `..` as regular entries, so emitting them from the on-disk data
+is correct.  Using `dir_emit_dots()` would emit them twice.
 
 **Important:** XV6 filenames are **not** null-terminated when they fill all
 `XV6FS_DIRSIZ` bytes.  When matching a name in `lookup`, compare using both
@@ -356,9 +424,11 @@ read(2)
 // Map a logical block to a disk block and fill bh_result
 map_bh(bh_result, sb, disk_block_nr);
 
-// Read the indirect block to resolve indirect addresses
+// Read the indirect block to resolve indirect addresses.
+// ei->addrs[] is already host-endian (converted in xv6fs_iget),
+// but the indirect block contents are raw on-disk data — use le32_to_cpu.
 struct buffer_head *ibh = sb_bread(sb, ei->addrs[XV6FS_NDIRECT]);
-__u32 disk_block = le32_to_cpu(((__u32 *)ibh->b_data)[idx]);
+__u32 disk_block = le32_to_cpu(((__le32 *)ibh->b_data)[idx]);
 brelse(ibh);
 
 // Delegate page reading to the mpage layer (kernel >= 5.19)

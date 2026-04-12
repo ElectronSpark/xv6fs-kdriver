@@ -184,6 +184,7 @@ static inline struct xv6fs_sb_info *xv6fs_sb(struct super_block *sb)
 /* super.c */
 extern const struct super_operations xv6fs_super_ops;
 int xv6fs_fill_super(struct super_block *sb, void *data, int silent);
+void xv6fs_release_sbi(struct xv6fs_sb_info *sbi);
 
 /* inode.c */
 extern const struct inode_operations xv6fs_file_inode_ops;
