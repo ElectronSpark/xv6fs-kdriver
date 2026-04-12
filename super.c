@@ -38,6 +38,13 @@ void xv6fs_release_sbi(struct xv6fs_sb_info *sbi)
  *   brelse(bh)  — release a buffer_head obtained from sb_bread().
  *                 Declared in <linux/buffer_head.h>.
  *   kfree(ptr)  — free a kmalloc/kzalloc allocation.
+ *
+ * VFS guarantees:
+ *   - Called exactly once per mount, during unmount.
+ *   - All dentries and inodes have been evicted before this is called
+ *     (generic_shutdown_super handles that).
+ *   - No other super_operations are running concurrently.
+ *   - sb->s_fs_info is still the value set in fill_super.
  * ---------------------------------------------------------------- */
 static void xv6fs_put_super(struct super_block *sb)
 {
@@ -62,6 +69,12 @@ static void xv6fs_put_super(struct super_block *sb)
  *     f_files   = sbi->raw_sb.ninodes
  *     f_ffree   = 0  (exact count requires scanning the inode table)
  *     f_namelen = XV6FS_DIRSIZ
+ *
+ * VFS guarantees:
+ *   - @dentry is a valid, referenced dentry within this filesystem.
+ *   - sb->s_fs_info is valid (filesystem is mounted).
+ *   - May be called concurrently with other operations; read-only
+ *     access to sbi->raw_sb is safe without locking.
  * ---------------------------------------------------------------- */
 static int xv6fs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
@@ -106,9 +119,9 @@ const struct super_operations xv6fs_super_ops = {
  *      Block 0 is the boot block — skip it.
  *      Return -EIO if sb_bread returns NULL.
  *
- *   4. Copy the raw superblock into sbi->raw_sb (fields remain __le32 —
- *      convert with le32_to_cpu() each time you read a field).  Store
- *      the buffer_head in sbi->bh, then set sb->s_fs_info = sbi.
+ *   4. Convert the on-disk superblock to host-endian with
+ *      xv6fs_sb_to_cpu() and store in sbi->raw_sb.  Store the
+ *      buffer_head in sbi->bh, then set sb->s_fs_info = sbi.
  *
  *   5. Verify the magic number against XV6FS_MAGIC.
  *      Remember to convert with le32_to_cpu().
@@ -176,17 +189,17 @@ int xv6fs_fill_super(struct super_block *sb, void *data, int silent)
 	// step 4: Fill in the sbi structure
 	sbi->bh = bh;
 	sb->s_fs_info = sbi;
-	sbi->raw_sb = *(struct xv6fs_superblock *)bh->b_data; // copy raw superblock data for later use
+	xv6fs_sb_to_cpu((const struct xv6fs_dsuperblock *)bh->b_data, &sbi->raw_sb);
 
 	// step 5: Verify the magic number
-	if (le32_to_cpu(sbi->raw_sb.magic) != XV6FS_MAGIC) {
+	if (sbi->raw_sb.magic != XV6FS_MAGIC) {
 		pr_err("xv6fs: invalid magic number: expected 0x%08x, got 0x%08x\n",
-		       XV6FS_MAGIC, le32_to_cpu(sbi->raw_sb.magic));
+		       XV6FS_MAGIC, sbi->raw_sb.magic);
 		ret = -EINVAL;
 		goto cleanup_sbi;
 	}
 
-	pr_info("xv6fs: magic number verified: 0x%08x\n", le32_to_cpu(sbi->raw_sb.magic));
+	pr_info("xv6fs: magic number verified: 0x%08x\n", sbi->raw_sb.magic);
 
 	// step 6: Populate the VFS super_block
 	sb->s_magic = sbi->raw_sb.magic;
@@ -211,7 +224,7 @@ int xv6fs_fill_super(struct super_block *sb, void *data, int silent)
 	}
 
 	pr_info("xv6fs: mounted superblock with %u blocks, %u inodes\n",
-		le32_to_cpu(sbi->raw_sb.size), le32_to_cpu(sbi->raw_sb.ninodes));
+		sbi->raw_sb.size, sbi->raw_sb.ninodes);
 
 	ret = 0;
 	goto out;

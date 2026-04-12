@@ -57,6 +57,11 @@
  *   generic_file_write_iter(iocb, from)  — <linux/fs.h>
  *   iov_iter_count(from)                 — <linux/uio.h>; check for empty write
  *   generic_write_checks(iocb, from)     — <linux/fs.h>; validate write params
+ *
+ * VFS guarantees:
+ *   - @iocb->ki_filp is a valid, open regular file with write access.
+ *   - inode->i_rwsem is held (via fdget_pos / generic write path).
+ *   - @from describes the user buffer; iov_iter_count(from) >= 0.
  */
 static ssize_t xv6fs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {

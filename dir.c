@@ -58,10 +58,77 @@
  *   strnlen(name, XV6FS_DIRSIZ)            — safe name length
  *   sb_bread(sb, block) / brelse(bh)
  *   file_inode(file)                       — <linux/fs.h>; get inode from file
+ *
+ * VFS guarantees:
+ *   - file is a valid, open directory (S_ISDIR tested at open time).
+ *   - file_inode(file) is non-NULL and holds an active reference.
+ *   - inode->i_rwsem is held shared (iterate_shared), so concurrent
+ *     readdir calls are safe but writes to the directory are excluded.
+ *   - ctx->pos is preserved across multiple getdents(2) calls so the
+ *     caller can resume iteration where it left off.
  * ---------------------------------------------------------------- */
 static int xv6fs_readdir(struct file *file, struct dir_context *ctx)
 {
-	/* TODO (stage 3) */
+	struct inode *inode = file_inode(file);
+	struct super_block *sb = inode->i_sb;
+	struct xv6fs_inode_info *ei = xv6fs_i(inode);
+	unsigned int pos = ctx->pos;
+	unsigned int size = inode->i_size;
+	struct buffer_head *ind_bh = NULL;
+	__le32 *ind_data = NULL;
+
+	if (pos >= size)
+		return 0;
+
+	/* Pre-read the indirect block if needed */
+	if (ei->addrs[XV6FS_NDIRECT] && size > XV6FS_NDIRECT * XV6FS_BSIZE) {
+		ind_bh = sb_bread(sb, ei->addrs[XV6FS_NDIRECT]);
+		if (!ind_bh)
+			return -EIO;
+		ind_data = (__le32 *)ind_bh->b_data;
+	}
+
+	for (; pos < size; pos += sizeof(struct xv6fs_dirent)) {
+		unsigned int blk_idx = pos / XV6FS_BSIZE;
+		unsigned int blk_off = pos % XV6FS_BSIZE;
+		__u32 phys;
+
+		/* Map logical block to physical */
+		if (blk_idx < XV6FS_NDIRECT) {
+			phys = ei->addrs[blk_idx];
+		} else if (ind_data) {
+			phys = le32_to_cpu(ind_data[blk_idx - XV6FS_NDIRECT]);
+		} else {
+			break;
+		}
+
+		if (phys == 0)
+			continue;
+
+		struct buffer_head *bh = sb_bread(sb, phys);
+		if (!bh) {
+			brelse(ind_bh);
+			return -EIO;
+		}
+
+		struct xv6fs_dirent *de = (struct xv6fs_dirent *)(bh->b_data + blk_off);
+		__u16 inum = le16_to_cpu(de->inum);
+
+		if (inum != 0) {
+			unsigned int namelen = strnlen(de->name, XV6FS_DIRSIZ);
+
+			if (!dir_emit(ctx, de->name, namelen, inum, DT_UNKNOWN)) {
+				brelse(bh);
+				brelse(ind_bh);
+				return 0;
+			}
+		}
+
+		brelse(bh);
+		ctx->pos = pos + sizeof(struct xv6fs_dirent);
+	}
+
+	brelse(ind_bh);
 	return 0;
 }
 
@@ -95,6 +162,13 @@ static int xv6fs_readdir(struct file *file, struct dir_context *ctx)
  *   xv6fs_iget(sb, ino)  — inode.c
  *   d_splice_alias(inode, dentry) — <linux/dcache.h>
  *   ERR_CAST(ptr)        — <linux/err.h>; re-cast an error pointer
+ *
+ * VFS guarantees:
+ *   - @dir is a valid, referenced directory inode (S_ISDIR).
+ *   - @dir->i_rwsem is held (exclusive for create/unlink, shared for
+ *     lookup), so no concurrent modifications to this directory.
+ *   - @dentry is a new, unhashed dentry with a valid d_name.
+ *   - dentry->d_name.len <= NAME_MAX (255).
  * ---------------------------------------------------------------- */
 static struct dentry *xv6fs_lookup(struct inode *dir, struct dentry *dentry,
 				   unsigned int flags)

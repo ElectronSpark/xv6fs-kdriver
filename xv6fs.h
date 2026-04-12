@@ -63,28 +63,15 @@
 #define XV6FS_BPB        (XV6FS_BSIZE * 8)
 
 /* -----------------------------------------------------------------------
- * Derived block-number macros
- *
- * These accept a pointer to the in-memory superblock copy (xv6fs_superblock).
- * --------------------------------------------------------------------- */
-
-/** Block number of the inode block that holds inode @ino. */
-#define XV6FS_IBLOCK(ino, sb)  ((ino) / XV6FS_IPB + (sb)->inodestart)
-#define XV6FS_IOFFSET(ino)     ((ino) % XV6FS_IPB)  /* idx offset of inode in its block */
-
-/** Block number of the bitmap block that tracks data block @b. */
-#define XV6FS_BBLOCK(b, sb)    ((b)   / XV6FS_BPB + (sb)->bmapstart)
-
-/* -----------------------------------------------------------------------
  * On-disk structures  (use __leNN types — XV6 is little-endian)
  * --------------------------------------------------------------------- */
 
 /**
- * struct xv6fs_superblock - on-disk superblock (block 1).
+ * struct xv6fs_dsuperblock - on-disk superblock (block 1).
  *
  * Block 0 is the boot block and is never read by the driver.
  */
-struct xv6fs_superblock {
+struct xv6fs_dsuperblock {
 	__le32 magic;       /* Must equal XV6FS_MAGIC                    */
 	__le32 size;        /* Total blocks in the file system           */
 	__le32 nblocks;     /* Number of data blocks                     */
@@ -93,6 +80,23 @@ struct xv6fs_superblock {
 	__le32 logstart;    /* Block number of the first log block       */
 	__le32 inodestart;  /* Block number of the first inode block     */
 	__le32 bmapstart;   /* Block number of the first free-map block  */
+};
+
+/**
+ * struct xv6fs_superblock - in-memory superblock (host-endian).
+ *
+ * Converted from the on-disk xv6fs_dsuperblock by xv6fs_sb_to_cpu().
+ * All fields are native __u32 — no le32_to_cpu() needed when reading.
+ */
+struct xv6fs_superblock {
+	__u32 magic;
+	__u32 size;
+	__u32 nblocks;
+	__u32 ninodes;
+	__u32 nlog;
+	__u32 logstart;
+	__u32 inodestart;
+	__u32 bmapstart;
 };
 
 /**
@@ -131,8 +135,8 @@ struct xv6fs_dirent {
  * Stored in:   sb->s_fs_info
  */
 struct xv6fs_sb_info {
-	struct xv6fs_superblock raw_sb; /* Host-endian copy of the on-disk superblock */
-	struct buffer_head     *bh;     /* Buffer head that holds the superblock block */
+	struct xv6fs_superblock raw_sb;  /* Host-endian copy of the on-disk superblock */
+	struct buffer_head *bh;     /* Buffer head that holds the superblock block */
 };
 
 /**
@@ -166,6 +170,24 @@ static inline struct xv6fs_sb_info *xv6fs_sb(struct super_block *sb)
 {
 	return sb->s_fs_info;
 }
+
+/* -----------------------------------------------------------------------
+ * Derived block-number macros
+ *
+ * These accept a pointer to the in-memory superblock copy (xv6fs_superblock).
+ * --------------------------------------------------------------------- */
+/** Block number of the inode block that holds inode @ino. */
+#define XV6FS_IBLOCK(ino, sbi)  ((ino) / XV6FS_IPB + (sbi)->raw_sb.inodestart)
+#define XV6FS_IOFFSET(ino)      ((ino) % XV6FS_IPB)
+
+/** Block number of the bitmap block that tracks data block @b. */
+#define XV6FS_BBLOCK(b, sbi)    ((b) / XV6FS_BPB + (sbi)->raw_sb.bmapstart)
+
+/** Block number of the first data block (bmapstart + nbitmap). */
+#define XV6FS_DSTART(sbi)  ((sbi)->raw_sb.bmapstart + (sbi)->raw_sb.size / XV6FS_BPB + 1)
+
+/** Block number of the data block corresponding to the logical block @d in a file. */
+#define XV6FS_DBLOCK(d, sbi)   ((d) + XV6FS_DSTART(sbi))
 
 /* -----------------------------------------------------------------------
  * Endian-conversion helpers
@@ -264,6 +286,42 @@ static inline void xv6fs_dirent_to_disk(const struct xv6fs_dirent *host,
 	memcpy(disk->name, host->name, XV6FS_DIRSIZ);
 }
 
+/**
+ * xv6fs_sb_to_cpu - convert an on-disk superblock to host-endian.
+ * @disk: pointer to the on-disk superblock (fields are __le32).
+ * @host: pointer to the host-endian xv6fs_superblock to populate.
+ */
+static inline void xv6fs_sb_to_cpu(const struct xv6fs_dsuperblock *disk,
+				   struct xv6fs_superblock *host)
+{
+	host->magic      = le32_to_cpu(disk->magic);
+	host->size       = le32_to_cpu(disk->size);
+	host->nblocks    = le32_to_cpu(disk->nblocks);
+	host->ninodes    = le32_to_cpu(disk->ninodes);
+	host->nlog       = le32_to_cpu(disk->nlog);
+	host->logstart   = le32_to_cpu(disk->logstart);
+	host->inodestart = le32_to_cpu(disk->inodestart);
+	host->bmapstart  = le32_to_cpu(disk->bmapstart);
+}
+
+/**
+ * xv6fs_sb_to_disk - convert a host-endian superblock to on-disk format.
+ * @host: pointer to the host-endian xv6fs_superblock.
+ * @disk: pointer to the on-disk buffer to fill.
+ */
+static inline void xv6fs_sb_to_disk(const struct xv6fs_superblock *host,
+				    struct xv6fs_dsuperblock *disk)
+{
+	disk->magic      = cpu_to_le32(host->magic);
+	disk->size       = cpu_to_le32(host->size);
+	disk->nblocks    = cpu_to_le32(host->nblocks);
+	disk->ninodes    = cpu_to_le32(host->ninodes);
+	disk->nlog       = cpu_to_le32(host->nlog);
+	disk->logstart   = cpu_to_le32(host->logstart);
+	disk->inodestart = cpu_to_le32(host->inodestart);
+	disk->bmapstart  = cpu_to_le32(host->bmapstart);
+}
+
 /* -----------------------------------------------------------------------
  * Kernel-version compatibility shims
  *
@@ -292,7 +350,7 @@ void xv6fs_destroy_inode_cache(void);
 struct inode *xv6fs_alloc_inode(struct super_block *sb);
 void          xv6fs_destroy_inode(struct inode *inode);
 struct inode *xv6fs_iget(struct super_block *sb, unsigned long ino);
-int  xv6fs_get_block(struct inode *inode, sector_t iblock,
+int  xv6fs_get_block(struct inode *inode, sector_t lblk,
 		     struct buffer_head *bh_result, int create);
 
 /* dir.c */

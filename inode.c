@@ -144,7 +144,7 @@ static int __xv6fs_read_inode(struct xv6fs_inode_info *ei)
 	unsigned long ino = inode->i_ino;
 
 	// Read the block containing this inode
-	sector_t block = XV6FS_IBLOCK(ino, &sbi->raw_sb);
+	sector_t block = XV6FS_IBLOCK(ino, sbi);
 	struct buffer_head *bh = sb_bread(sb, block);
 	if (!bh) {
 		pr_err("xv6fs: failed to read inode block for inode %lu\n", ino);
@@ -177,7 +177,7 @@ static int __xv6fs_write_inode(struct xv6fs_inode_info *ei)
 	unsigned long ino = inode->i_ino;
 
 	// Read the block containing this inode
-	sector_t block = XV6FS_IBLOCK(ino, &sbi->raw_sb);
+	sector_t block = XV6FS_IBLOCK(ino, sbi);
 	struct buffer_head *bh = sb_bread(sb, block);
 	if (!bh) {
 		pr_err("xv6fs: failed to read inode block for inode %lu\n", ino);
@@ -205,7 +205,7 @@ static int __xv6fs_write_inode(struct xv6fs_inode_info *ei)
  *      return it immediately.
  *
  *   2. For a newly allocated inode (I_NEW is set):
- *      a. Read the inode block: block = XV6FS_IBLOCK(ino, &sbi->raw_sb)
+ *      a. Read the inode block: block = XV6FS_IBLOCK(ino, sbi)
  *         bh = sb_bread(sb, block)
  *      b. Index into the block:
  *         raw = (struct xv6fs_dinode *)bh->b_data + (ino % XV6FS_IPB)
@@ -243,9 +243,9 @@ struct inode *xv6fs_iget(struct super_block *sb, unsigned long ino)
 
 	// Reject inode numbers that exceed the maximum defined in the superblock
 	struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
-	if (ino >= le32_to_cpu(sbi->raw_sb.ninodes)) {
+	if (ino >= sbi->raw_sb.ninodes) {
 		pr_err("xv6fs: inode number %lu exceeds maximum %u\n",
-		       ino, le32_to_cpu(sbi->raw_sb.ninodes) - 1);
+		       ino, sbi->raw_sb.ninodes - 1);
 		return ERR_PTR(-EINVAL);
 	}
 
@@ -306,7 +306,7 @@ struct inode *xv6fs_iget(struct super_block *sb, unsigned long ino)
 /* ------------------------------------------------------------------
  * xv6fs_get_block
  *
- * Map logical file block @iblock to a physical disk block and fill
+ * Map logical file block @lblk to a physical disk block and fill
  * @bh_result so the page-cache layer can issue the I/O.
  *
  * This function is the bridge between the VFS page cache and the
@@ -314,12 +314,12 @@ struct inode *xv6fs_iget(struct super_block *sb, unsigned long ino)
  * (file.c) for every block in a page that needs to be read.
  *
  * Steps to follow:
- *   Direct blocks (iblock < XV6FS_NDIRECT):
- *     disk_block = ei->addrs[iblock]
+ *   Direct blocks (lblk < XV6FS_NDIRECT):
+ *     disk_block = ei->addrs[lblk]
  *     (addrs[] is already host-endian, converted in xv6fs_iget)
  *
- *   Indirect block (iblock >= XV6FS_NDIRECT):
- *     idx        = iblock - XV6FS_NDIRECT
+ *   Indirect block (lblk >= XV6FS_NDIRECT):
+ *     idx        = lblk - XV6FS_NDIRECT
  *     Return -EFBIG if idx >= XV6FS_NINDIRECT.
  *     indirect_bh = sb_bread(sb, ei->addrs[XV6FS_NDIRECT])
  *     disk_block  = le32_to_cpu(((__le32 *)indirect_bh->b_data)[idx])
@@ -344,12 +344,57 @@ struct inode *xv6fs_iget(struct super_block *sb, unsigned long ino)
  *   brelse(bh)               — <linux/buffer_head.h>
  *   mark_inode_dirty(inode)  — <linux/fs.h>; schedule inode for write-back
  *   le32_to_cpu(x)           — endianness helper
+ *
+ * VFS guarantees:
+ *   - @inode is a valid, referenced inode.
+ *   - @lblk is non-negative.
+ *   - @bh_result is a pre-allocated, unmapped buffer_head.
+ *   - May be called concurrently for the same inode from different
+ *     page cache read paths; ei->addrs[] is read-only (stage 4) so
+ *     no locking is needed for reads.
+ *   - @create == 0 for reads; @create == 1 for writes (stage 5).
  * ---------------------------------------------------------------- */
-int xv6fs_get_block(struct inode *inode, sector_t iblock,
+int xv6fs_get_block(struct inode *inode, sector_t lblk,
 		    struct buffer_head *bh_result, int create)
 {
-	/* TODO (stage 4: read path; stage 5: write/allocate path) */
-	return -EINVAL;
+	struct xv6fs_inode_info *ei = xv6fs_i(inode);
+
+	if (lblk < XV6FS_NDIRECT) {
+		// Direct block
+		sector_t disk_block = ei->addrs[lblk];
+		if (disk_block == 0) {
+			// Hole
+			return 0;
+		}
+		map_bh(bh_result, inode->i_sb, disk_block);
+		return 0;
+	} else if (lblk < XV6FS_NDIRECT + XV6FS_NINDIRECT) {
+		sector_t ind_block = ei->addrs[XV6FS_NDIRECT];
+		if (ind_block == 0) {
+			// Hole (no indirect block)
+			return 0;
+		}
+		struct buffer_head *ind_bh = sb_bread(inode->i_sb, ind_block);
+		if (!ind_bh) {
+			pr_err("xv6fs: failed to read indirect block for inode %lu\n",
+			       inode->i_ino);
+			return -EIO;
+		}
+		__le32 *ind_data = (__le32 *)ind_bh->b_data;
+		sector_t disk_block = le32_to_cpu(ind_data[lblk - XV6FS_NDIRECT]);
+		brelse(ind_bh);
+		if (disk_block == 0) {
+			// Hole
+			return 0;
+		}
+		map_bh(bh_result, inode->i_sb, disk_block);
+		return 0;
+	}
+
+	// Invalid block number
+	pr_err("xv6fs: logical block %lu exceeds maximum for inode %lu\n",
+		(unsigned long)lblk, inode->i_ino);
+	return -EFBIG;
 }
 
 /* ------------------------------------------------------------------
