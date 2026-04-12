@@ -53,7 +53,6 @@ static struct dentry *xv6fs_mount(struct file_system_type *fs_type, int flags,
  */
 static void xv6fs_kill_sb(struct super_block *sb)
 {
-	xv6fs_release_sbi(xv6fs_sb(sb));
 	kill_block_super(sb);
 }
 

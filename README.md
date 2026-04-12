@@ -13,9 +13,10 @@ you to implement following the roadmap below.
 2. [Project Structure](#project-structure)
 3. [Prerequisites](#prerequisites)
 4. [Build & Load](#build--load)
-5. [Creating a Test Image](#creating-a-test-image)
-6. [Roadmap](#roadmap)
-7. [XV6 FS Limitations](#xv6-fs-limitations)
+5. [Development VM](#development-vm)
+6. [Creating a Test Image](#creating-a-test-image)
+7. [Roadmap](#roadmap)
+8. [XV6 FS Limitations](#xv6-fs-limitations)
 
 ---
 
@@ -51,7 +52,10 @@ xv6fs-kdriver/
 ├── super.c        — superblock operations  (stage 1)
 ├── inode.c        — inode cache, block mapping  (stages 2 & 4)
 ├── dir.c         — directory readdir & lookup  (stage 3)
-└── file.c        — file read/write operations  (stages 4 & 5)
+├── file.c        — file read/write operations  (stages 4 & 5)
+└── vm/            — QEMU development VM scripts
+    ├── setup.sh   — create a Debian trixie VM with kdump + 9p share
+    └── run.sh     — launch the VM
 ```
 
 ---
@@ -63,6 +67,12 @@ Install the build tools:
 ```bash
 sudo apt-get update
 sudo apt-get install build-essential dwarves libelf-dev libssl-dev bc flex bison
+```
+
+For the [development VM](#development-vm) (recommended on WSL2):
+
+```bash
+sudo apt-get install debootstrap qemu-system-x86 qemu-utils
 ```
 
 On a **native Linux** system (VM or dual-boot), also install the kernel
@@ -157,6 +167,64 @@ sudo rmmod xv6fs
 ```bash
 make clean && make
 ```
+
+---
+
+## Development VM
+
+A kernel panic during module development crashes the entire WSL2 instance.
+To avoid this, use the included QEMU/KVM development VM — panics stay
+contained, and crash logs survive reboots.
+
+### Prerequisites
+
+```bash
+sudo apt install debootstrap qemu-system-x86 qemu-utils
+```
+
+For KVM acceleration on WSL2, enable nested virtualisation in
+`%USERPROFILE%\.wslconfig`:
+
+```ini
+[wsl2]
+nestedVirtualization=true
+```
+
+Then restart WSL (`wsl --shutdown`).  Without KVM the VM still works but
+uses software emulation.
+
+### Create the VM
+
+```bash
+./vm/setup.sh          # creates vm/disk.img, vm/vmlinuz, vm/initrd.img
+```
+
+This bootstraps a Debian trixie (kernel 6.12) rootfs with:
+- `linux-headers-amd64` and `build-essential` for in-guest builds
+- **9p share**: the repo is mounted at `/mnt/src` inside the guest
+- **kdump**: crash dumps saved to `/var/crash/`
+- **Persistent journald**: info-level logs in `/var/log/journal/`
+- Serial console with root autologin
+
+### Launch
+
+```bash
+./vm/run.sh            # boots with serial console; exit: Ctrl-A, X
+
+# Override defaults:
+QEMU_MEM=4G QEMU_SMP=4 ./vm/run.sh
+```
+
+### Inside the VM
+
+| Alias | Action |
+|---|---|
+| `reload` | `make clean && make && insmod xv6fs.ko` |
+| `testmount` | mount `test.img` at `/mnt/test` |
+| `testumount` | unmount `/mnt/test` |
+| `klog` | recent kernel log |
+| `prevboot` | previous boot's full journal (useful after a crash) |
+| `lastcrash` | list crash dumps in `/var/crash/` |
 
 ---
 

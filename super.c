@@ -41,12 +41,9 @@ void xv6fs_release_sbi(struct xv6fs_sb_info *sbi)
  * ---------------------------------------------------------------- */
 static void xv6fs_put_super(struct super_block *sb)
 {
-	/* TODO (stage 1):
-	 *   struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
-	 *   brelse(sbi->bh);
-	 *   kfree(sbi);
-	 *   sb->s_fs_info = NULL;
-	 */
+	xv6fs_release_sbi(xv6fs_sb(sb));
+	sb->s_fs_info = NULL;
+	pr_info("xv6fs: superblock released for device %s\n", sb->s_id);
 }
 
 /* ------------------------------------------------------------------
@@ -197,10 +194,27 @@ int xv6fs_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_maxbytes = XV6FS_MAXFILE * XV6FS_BSIZE;
 	sb->s_time_gran = 1; // XV6 has no timestamps; 1 ns granularity
 
+	pr_info("xv6fs: superblock populated: max file size = %lld bytes\n", sb->s_maxbytes);
+
+	struct inode *rooti = xv6fs_iget(sb, XV6FS_ROOTINO);
+	if (IS_ERR(rooti)) {
+		pr_err("xv6fs: failed to get root inode\n");
+		ret = PTR_ERR(rooti);
+		goto cleanup_sbi;
+	}
+
+	sb->s_root = d_make_root(rooti);
+	if (!sb->s_root) {
+		pr_err("xv6fs: failed to create root dentry\n");
+		ret = -ENOMEM;
+		goto cleanup_sbi;
+	}
+
 	pr_info("xv6fs: mounted superblock with %u blocks, %u inodes\n",
 		le32_to_cpu(sbi->raw_sb.size), le32_to_cpu(sbi->raw_sb.ninodes));
 
-	ret = -EINVAL; // Always return an error for now until we implement the root dentry (stage 2)
+	ret = 0;
+	goto out;
 
 cleanup_sbi:
 	if (ret != 0) {

@@ -125,6 +125,74 @@ const struct inode_operations xv6fs_file_inode_ops = {
 };
 
 /* ------------------------------------------------------------------
+ * __xv6fs_read_inode - read inode @ino from disk into VFS inode.
+ *
+ * Reads the block containing inode @ino, converts the on-disk dinode
+ * into the in-memory xv6fs_inode_info and VFS inode fields using
+ * xv6fs_dinode_to_cpu().  Does NOT set i_mode, i_op, i_fop, a_ops,
+ * i_blocks, i_uid, i_gid, or timestamps — the caller must do that
+ * based on ei->i_type.
+ *
+ * Returns 0 on success, -EIO if the block cannot be read.
+ * ---------------------------------------------------------------- */
+static int __xv6fs_read_inode(struct xv6fs_inode_info *ei)
+{
+	struct inode *inode = &ei->vfs_inode;
+	struct super_block *sb = inode->i_sb;
+	struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
+	unsigned long ino = inode->i_ino;
+
+	// Read the block containing this inode
+	sector_t block = XV6FS_IBLOCK(ino, &sbi->raw_sb);
+	struct buffer_head *bh = sb_bread(sb, block);
+	if (!bh) {
+		pr_err("xv6fs: failed to read inode block for inode %lu\n", ino);
+		return -EIO;
+	}
+
+	// Index into the block and convert to host-endian
+	struct xv6fs_dinode *raw = (struct xv6fs_dinode *)bh->b_data + XV6FS_IOFFSET(ino);
+	xv6fs_dinode_to_cpu(raw, ei);
+
+	brelse(bh);
+	return 0;
+}
+
+/* ------------------------------------------------------------------
+ * __xv6fs_write_inode - write VFS inode metadata back to disk.
+ *
+ * Reads the block containing inode @ino, converts the in-memory
+ * xv6fs_inode_info and VFS inode fields back to on-disk format using
+ * xv6fs_dinode_to_disk(), overwrites the slot, and marks the buffer
+ * dirty.  Does NOT handle indirect block mapping or data blocks.
+ *
+ * Returns 0 on success, -EIO if the block cannot be read.
+ * ---------------------------------------------------------------- */
+static int __xv6fs_write_inode(struct xv6fs_inode_info *ei)
+{
+	struct inode *inode = &ei->vfs_inode;
+	struct super_block *sb = inode->i_sb;
+	struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
+	unsigned long ino = inode->i_ino;
+
+	// Read the block containing this inode
+	sector_t block = XV6FS_IBLOCK(ino, &sbi->raw_sb);
+	struct buffer_head *bh = sb_bread(sb, block);
+	if (!bh) {
+		pr_err("xv6fs: failed to read inode block for inode %lu\n", ino);
+		return -EIO;
+	}
+
+	// Convert to on-disk format and write back
+	struct xv6fs_dinode *raw = (struct xv6fs_dinode *)bh->b_data + XV6FS_IOFFSET(ino);
+	xv6fs_dinode_to_disk(ei, raw);
+
+	mark_buffer_dirty(bh);
+	brelse(bh);
+	return 0;
+}
+
+/* ------------------------------------------------------------------
  * xv6fs_iget
  *
  * Return the VFS inode for inode number @ino, reading it from disk if
@@ -146,7 +214,7 @@ const struct inode_operations xv6fs_file_inode_ops = {
  *           - set inode->i_size (le32_to_cpu), set_nlink() (le16_to_cpu)
  *           - set inode->i_blocks = (inode->i_size + 511) / 512
  *           - set inode->i_uid/gid (fake root)
- *           - XV6FS_ZERO_CTIME(inode); inode->i_atime = inode->i_mtime = …
+ *           - inode_set_atime/mtime/ctime(inode, 0, 0)
  *           - switch on ei->i_type to set inode->i_mode, ->i_op, ->i_fop
  *             and (for files) inode->i_mapping->a_ops = &xv6fs_aops
  *      d. brelse(bh)
@@ -166,8 +234,72 @@ const struct inode_operations xv6fs_file_inode_ops = {
  * ---------------------------------------------------------------- */
 struct inode *xv6fs_iget(struct super_block *sb, unsigned long ino)
 {
-	/* TODO (stage 2) */
-	return ERR_PTR(-EINVAL);
+	// Reject invalid inode numbers (0 is not used in XV6)	
+	if (ino == 0) {
+		pr_err("xv6fs: invalid inode number: %lu\n", ino);
+		return ERR_PTR(-EINVAL);
+	}
+
+	// Reject inode numbers that exceed the maximum defined in the superblock
+	struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
+	if (ino >= le32_to_cpu(sbi->raw_sb.ninodes)) {
+		pr_err("xv6fs: inode number %lu exceeds maximum %u\n",
+		       ino, le32_to_cpu(sbi->raw_sb.ninodes) - 1);
+		return ERR_PTR(-EINVAL);
+	}
+
+	// Look up the inode cache
+	struct inode *inode = iget_locked(sb, ino);
+	if (!inode) {
+		return ERR_PTR(-ENOMEM);
+	}
+
+	if (!(inode->i_state & I_NEW)) {
+		// Inode already exists in cache; return it
+		return inode;
+	}
+
+	struct xv6fs_inode_info *ei = xv6fs_i(inode);
+	int ret = __xv6fs_read_inode(ei);
+	if (ret != 0) {
+		iget_failed(inode);
+		return ERR_PTR(ret);
+	}
+
+	// Set VFS inode fields based on xv6 inode type
+	inode->i_blocks = (inode->i_size + 511) / 512;
+	inode->i_uid = make_kuid(&init_user_ns, 0);
+	inode->i_gid = make_kgid(&init_user_ns, 0);
+	inode_set_atime(inode, 0, 0);
+	inode_set_mtime(inode, 0, 0);
+	inode_set_ctime(inode, 0, 0);
+
+	switch (ei->i_type) {
+	case XV6FS_T_DIR:
+		inode->i_mode = S_IFDIR | 0755;
+		inode->i_op = &xv6fs_dir_inode_ops;
+		inode->i_fop = &xv6fs_dir_fops;
+		break;
+	case XV6FS_T_FILE:
+		inode->i_mode = S_IFREG | 0644;
+		inode->i_op = &xv6fs_file_inode_ops;
+		inode->i_fop = &xv6fs_file_fops;
+		inode->i_mapping->a_ops = &xv6fs_aops;
+		break;
+	case XV6FS_T_DEV:
+		inode->i_mode = S_IFCHR | 0600;
+		init_special_inode(inode, inode->i_mode,
+				   MKDEV(ei->i_major, ei->i_minor));
+		break;
+	default:
+		pr_err("xv6fs: unknown inode type %d for inode %lu\n",
+		       ei->i_type, ino);
+		iget_failed(inode);
+		return ERR_PTR(-EINVAL);
+	}
+
+	unlock_new_inode(inode);
+	return inode;
 }
 
 /* ------------------------------------------------------------------

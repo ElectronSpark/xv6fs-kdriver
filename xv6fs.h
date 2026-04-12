@@ -70,6 +70,7 @@
 
 /** Block number of the inode block that holds inode @ino. */
 #define XV6FS_IBLOCK(ino, sb)  ((ino) / XV6FS_IPB + (sb)->inodestart)
+#define XV6FS_IOFFSET(ino)     ((ino) % XV6FS_IPB)  /* idx offset of inode in its block */
 
 /** Block number of the bitmap block that tracks data block @b. */
 #define XV6FS_BBLOCK(b, sb)    ((b)   / XV6FS_BPB + (sb)->bmapstart)
@@ -164,6 +165,103 @@ static inline struct xv6fs_inode_info *xv6fs_i(struct inode *inode)
 static inline struct xv6fs_sb_info *xv6fs_sb(struct super_block *sb)
 {
 	return sb->s_fs_info;
+}
+
+/* -----------------------------------------------------------------------
+ * Endian-conversion helpers
+ *
+ * XV6 stores all integers in little-endian format on disk.  The kernel
+ * works in host-endian (CPU-native) format.  These helpers centralise
+ * the conversion so callers don't have to sprinkle le*_to_cpu / cpu_to_le*
+ * everywhere.  On LE hosts the swap macros are no-ops, so there is no
+ * runtime cost.
+ *
+ * "dinode_to_cpu"  — disk  → host  (used when reading an inode from disk)
+ * "dinode_to_disk" — host  → disk  (used when writing an inode to disk)
+ * "dirent_to_cpu"  — disk  → host  (used when reading a dir entry)
+ * "dirent_to_disk" — host  → disk  (used when writing a dir entry)
+ *
+ * The name field in xv6fs_dirent is a byte array and does not need
+ * endian conversion, so only the @inum field is swapped.
+ *
+ * For struct xv6fs_dinode — ALL fields are converted:
+ *   __le16: type, major, minor, nlink
+ *   __le32: size, addrs[0..XV6FS_NDIRECT]   (13 entries)
+ *
+ * nlink and size live in the VFS inode, so the helpers take a
+ * struct inode * alongside xv6fs_inode_info * to access them.
+ * --------------------------------------------------------------------- */
+
+/**
+ * xv6fs_dinode_to_cpu - convert an on-disk inode to host-endian.
+ * @raw:   pointer to the on-disk inode (fields are __le16 / __le32).
+ * @ei:    pointer to the in-memory xv6fs_inode_info to populate.
+ *
+ * Converts every field.  The VFS inode is accessed via ei->vfs_inode.
+ * Does NOT set i_mode, i_op, i_fop —
+ * the caller must do that based on ei->i_type after this returns.
+ */
+static inline void xv6fs_dinode_to_cpu(const struct xv6fs_dinode *raw,
+				       struct xv6fs_inode_info *ei)
+{
+	struct inode *inode = &ei->vfs_inode;
+	int i;
+
+	ei->i_type  = le16_to_cpu(raw->type);
+	ei->i_major = le16_to_cpu(raw->major);
+	ei->i_minor = le16_to_cpu(raw->minor);
+	set_nlink(inode, le16_to_cpu(raw->nlink));
+	inode->i_size = le32_to_cpu(raw->size);
+
+	for (i = 0; i < XV6FS_NDIRECT + 1; i++)
+		ei->addrs[i] = le32_to_cpu(raw->addrs[i]);
+}
+
+/**
+ * xv6fs_dinode_to_disk - convert host-endian inode info back to on-disk format.
+ * @ei:    pointer to the in-memory xv6fs_inode_info (host-endian fields).
+ * @raw:   pointer to the on-disk inode buffer to fill.
+ *
+ * Converts every field including nlink and size from ei->vfs_inode.
+ */
+static inline void xv6fs_dinode_to_disk(const struct xv6fs_inode_info *ei,
+					struct xv6fs_dinode *raw)
+{
+	const struct inode *inode = &ei->vfs_inode;
+	int i;
+
+	raw->type  = cpu_to_le16(ei->i_type);
+	raw->major = cpu_to_le16(ei->i_major);
+	raw->minor = cpu_to_le16(ei->i_minor);
+	raw->nlink = cpu_to_le16(inode->i_nlink);
+	raw->size  = cpu_to_le32(inode->i_size);
+
+	for (i = 0; i < XV6FS_NDIRECT + 1; i++)
+		raw->addrs[i] = cpu_to_le32(ei->addrs[i]);
+}
+
+/**
+ * xv6fs_dirent_to_cpu - convert an on-disk directory entry to host-endian.
+ * @disk: pointer to the on-disk directory entry (inum is __le16).
+ * @host: pointer to the host-endian output struct to populate.
+ */
+static inline void xv6fs_dirent_to_cpu(const struct xv6fs_dirent *disk,
+					struct xv6fs_dirent *host)
+{
+	host->inum = le16_to_cpu(disk->inum);
+	memcpy(host->name, disk->name, XV6FS_DIRSIZ);
+}
+
+/**
+ * xv6fs_dirent_to_disk - convert a host-endian directory entry to on-disk format.
+ * @host: pointer to the host-endian directory entry.
+ * @disk: pointer to the on-disk buffer to fill (inum becomes __le16).
+ */
+static inline void xv6fs_dirent_to_disk(const struct xv6fs_dirent *host,
+					 struct xv6fs_dirent *disk)
+{
+	disk->inum = cpu_to_le16(host->inum);
+	memcpy(disk->name, host->name, XV6FS_DIRSIZ);
 }
 
 /* -----------------------------------------------------------------------
