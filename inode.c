@@ -14,6 +14,7 @@
  */
 
 #include <linux/buffer_head.h>
+#include <linux/mpage.h>
 #include <linux/slab.h>
 #include "xv6fs.h"
 
@@ -268,8 +269,8 @@ struct inode *xv6fs_iget(struct super_block *sb, unsigned long ino)
 
 	// Set VFS inode fields based on xv6 inode type
 	inode->i_blocks = (inode->i_size + 511) / 512;
-	inode->i_uid = make_kuid(&init_user_ns, 0);
-	inode->i_gid = make_kgid(&init_user_ns, 0);
+	inode->i_uid = make_kuid(&init_user_ns, 1000);
+	inode->i_gid = make_kgid(&init_user_ns, 1000);
 	inode_set_atime(inode, 0, 0);
 	inode_set_mtime(inode, 0, 0);
 	inode_set_ctime(inode, 0, 0);
@@ -361,33 +362,39 @@ int xv6fs_get_block(struct inode *inode, sector_t iblock,
 /*
  * xv6fs_read_folio - read one page of file data into the page cache.
  *
- * Delegate to mpage_read_folio(), passing xv6fs_get_block as the mapper.
+ * Delegates to mpage_read_folio(), which calls xv6fs_get_block for
+ * each logical block in the folio to resolve physical disk blocks,
+ * then issues the I/O.
  *
- * API hints:
+ * Steps to implement:
+ *   1. Call mpage_read_folio(folio, xv6fs_get_block).
+ *      mpage_read_folio handles folio locking/unlocking internally,
+ *      so do NOT call folio_unlock() yourself.
+ *
+ * API:
  *   mpage_read_folio(folio, get_block)  — <linux/mpage.h>
- *     Kernel >= 5.19 only.  On older kernels use:
- *       block_read_full_page(page, get_block)  — <linux/buffer_head.h>
- *     and change the address_space_operations field from .read_folio
- *     to .readpage.
  */
 static int xv6fs_read_folio(struct file *file, struct folio *folio)
 {
-	/* TODO (stage 4) */
-	folio_unlock(folio);
-	return -EINVAL;
+	return mpage_read_folio(folio, xv6fs_get_block);
 }
 
 /*
  * xv6fs_bmap - convert a file's logical block number to a disk sector.
  *
- * Used by tools such as lsof(8).  Delegate to generic_block_bmap().
+ * Used by tools such as lsof(8) and the FIBMAP ioctl.
+ * Delegates to generic_block_bmap(), which calls xv6fs_get_block.
  *
- * API: generic_block_bmap(mapping, block, get_block)  — <linux/buffer_head.h>
+ * Steps to implement:
+ *   1. Call generic_block_bmap(mapping, block, xv6fs_get_block).
+ *      It calls xv6fs_get_block internally to resolve the mapping.
+ *
+ * API:
+ *   generic_block_bmap(mapping, block, get_block)  — <linux/buffer_head.h>
  */
 static sector_t xv6fs_bmap(struct address_space *mapping, sector_t block)
 {
-	/* TODO (stage 4) */
-	return 0;
+	return generic_block_bmap(mapping, block, xv6fs_get_block);
 }
 
 const struct address_space_operations xv6fs_aops = {

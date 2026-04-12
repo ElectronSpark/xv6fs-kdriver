@@ -25,4 +25,5 @@ mkfs.xv6fs
 vm/disk.img
 vm/vmlinuz
 vm/initrd.img
+vm/kheaders/
 vm/kbuild

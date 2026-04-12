@@ -174,6 +174,29 @@ sudo cp "$MNT/boot/vmlinuz-$KVER"    "$VMDIR/vmlinuz"
 sudo cp "$MNT/boot/initrd.img-$KVER" "$VMDIR/initrd.img"
 sudo chown "$(id -u):$(id -g)" "$VMDIR/vmlinuz" "$VMDIR/initrd.img"
 
+# ── Copy kernel headers for host IntelliSense ───────────────────────
+#
+# Debian splits headers into arch-specific + common + kbuild.  The
+# arch-specific tree contains symlinks into the other two, so we
+# dereference (-L) when copying to make a self-contained tree.
+echo "==> Extracting kernel headers for host IntelliSense..."
+KHEADERS="$VMDIR/kheaders"
+rm -rf "$KHEADERS"
+mkdir -p "$KHEADERS"
+
+ARCH_HDR="$MNT/usr/src/linux-headers-$KVER"
+COMMON_HDR="$MNT/usr/src/linux-headers-${KVER%-*}-common"
+
+sudo cp -aL "$ARCH_HDR"   "$KHEADERS/amd64"
+sudo cp -aL "$COMMON_HDR" "$KHEADERS/common"
+sudo chown -R "$(id -u):$(id -g)" "$KHEADERS"
+
+# Fix the arch Makefile to use the local common tree instead of /usr/src
+sed -i "s|/usr/src/linux-headers-[^ ]*/|$KHEADERS/common/|g" \
+    "$KHEADERS/amd64/Makefile"
+
+echo "    Headers: $KHEADERS/{amd64,common}"
+
 # ── Unmount ──────────────────────────────────────────────────────────
 echo "==> Unmounting..."
 for mp in dev/pts dev sys proc; do

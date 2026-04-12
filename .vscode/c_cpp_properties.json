@@ -3,7 +3,23 @@
         {
             "name": "Kernel Module",
             "compileCommands": "${workspaceFolder}/compile_commands.json",
-            "intelliSenseMode": "linux-gcc-x64"
+            "compilerPath": "/usr/bin/x86_64-linux-gnu-gcc-14",
+            "intelliSenseMode": "linux-gcc-x64",
+            "includePath": [
+                "${workspaceFolder}/vm/kheaders/common/include",
+                "${workspaceFolder}/vm/kheaders/common/arch/x86/include",
+                "${workspaceFolder}/vm/kheaders/common/arch/x86/include/uapi",
+                "${workspaceFolder}/vm/kheaders/common/include/uapi",
+                "${workspaceFolder}/vm/kheaders/amd64/include",
+                "${workspaceFolder}/vm/kheaders/amd64/include/generated",
+                "${workspaceFolder}/vm/kheaders/amd64/include/generated/uapi",
+                "${workspaceFolder}/vm/kheaders/amd64/arch/x86/include/generated",
+                "${workspaceFolder}/vm/kheaders/amd64/arch/x86/include/generated/uapi"
+            ],
+            "defines": [
+                "__KERNEL__",
+                "MODULE"
+            ]
         }
     ],
     "version": 4

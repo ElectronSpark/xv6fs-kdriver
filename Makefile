@@ -41,4 +41,17 @@ load:
 unload:
 	sudo rmmod xv6fs
 
-.PHONY: all modules clean load unload install-mkfs uninstall-mkfs
+.PHONY: all modules clean load unload install-mkfs uninstall-mkfs compile_commands.json
+
+# Generate compile_commands.json using VM guest headers for IntelliSense.
+# Requires: vm/kheaders/ (created by vm/setup.sh)
+#           gen_compile_commands.py from a kernel source tree
+GEN_COMPDB ?= $(firstword $(wildcard /home/*/reps/WSL2-Linux-Kernel/scripts/clang-tools/gen_compile_commands.py) \
+              $(wildcard $(KDIR)/scripts/clang-tools/gen_compile_commands.py))
+
+compile_commands.json: vm/kheaders/amd64/Makefile
+	-$(MAKE) -C vm/kheaders/amd64 M=$(PWD) modules
+	python3 $(GEN_COMPDB) -d . -o $@
+	sed -i -e 's|"directory": ".*"|"directory": "$(PWD)"|' \
+	       -e 's|-I\./|-I$(PWD)/vm/kheaders/amd64/|g' $@
+	@echo "Generated $@"
