@@ -117,12 +117,43 @@ static int xv6fs_write_inode(struct inode *inode,
 	return -EROFS;
 }
 
+/*
+ * xv6fs_evict_inode - clean up an inode being removed from the cache.
+ *
+ * Called by the VFS when an inode's last in-memory reference is dropped.
+ * If nlink == 0 (file was deleted), this must free all data blocks
+ * (direct + indirect) via xv6fs_bfree() and return the inode to the
+ * free list in sbi->dinodes.
+ *
+ * Steps to implement:
+ *   1. Call truncate_inode_pages_final(&inode->i_data) to discard
+ *      all cached pages for this inode.
+ *   2. If inode->i_nlink == 0:
+ *      a. Free all direct blocks: walk ei->addrs[0..NDIRECT-1],
+ *         xv6fs_bfree() each non-zero entry, zero it.
+ *      b. Free the indirect block and its entries if present.
+ *      c. Set inode->i_size = 0 and return the dinode to the
+ *         free list in sbi->dinodes.
+ *   3. Call clear_inode(inode) to mark the VFS inode as dead.
+ *
+ * VFS guarantees:
+ *   - @inode is a valid inode with i_count == 0.
+ *   - No other thread is accessing this inode.
+ */
+static void xv6fs_evict_inode(struct inode *inode)
+{
+	/* TODO (stage 5) */
+	truncate_inode_pages_final(&inode->i_data);
+	clear_inode(inode);
+}
+
 const struct super_operations xv6fs_super_ops = {
 	/* Memory management — implemented in inode.c */
 	.alloc_inode   = xv6fs_alloc_inode,
-	.destroy_inode = xv6fs_destroy_inode,
+	.free_inode    = xv6fs_free_inode,
 
 	.write_inode   = xv6fs_write_inode,
+	.evict_inode   = xv6fs_evict_inode,
 
 	.put_super     = xv6fs_put_super,
 	.statfs        = xv6fs_statfs,

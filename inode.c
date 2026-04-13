@@ -9,7 +9,7 @@
  *   xv6fs_get_block  — map a file's logical block number to a disk block.
  *
  * The inode slab cache boilerplate (xv6fs_init_inode_cache,
- * xv6fs_alloc_inode, xv6fs_destroy_inode) is already provided because
+ * xv6fs_alloc_inode, xv6fs_free_inode) is already provided because
  * it is identical in every Linux filesystem driver.
  */
 
@@ -64,8 +64,10 @@ int xv6fs_init_inode_cache(void)
 /*
  * xv6fs_destroy_inode_cache - destroy the slab; called from xv6fs_exit().
  *
- * rcu_barrier() waits for all pending call_rcu() callbacks (see
- * xv6fs_destroy_inode below) to finish before we tear down the cache.
+ * rcu_barrier() is still needed even with free_inode: the VFS core
+ * calls call_rcu() internally before invoking free_inode, so pending
+ * callbacks may still reference objects in our slab cache.  We must
+ * drain them before tearing down the cache.
  */
 void xv6fs_destroy_inode_cache(void)
 {
@@ -93,26 +95,18 @@ struct inode *xv6fs_alloc_inode(struct super_block *sb)
 }
 
 /*
- * xv6fs_i_callback - RCU callback that frees the inode after a grace period.
+ * xv6fs_free_inode - free an inode after the RCU grace period.
+ *
+ * Called by the VFS (via super_ops.free_inode) after the RCU grace
+ * period has already elapsed.  Unlike destroy_inode, which requires
+ * the filesystem to manually defer freeing with call_rcu(), free_inode
+ * is invoked post-grace-period by the VFS itself — so we can free
+ * immediately here.  This avoids the boilerplate of a separate RCU
+ * callback and is the preferred API since kernel 5.x.
  */
-static void xv6fs_i_callback(struct rcu_head *head)
+void xv6fs_free_inode(struct inode *inode)
 {
-	struct inode *inode = container_of(head, struct inode, i_rcu);
-
 	kmem_cache_free(xv6fs_inode_cachep, xv6fs_i(inode));
-}
-
-/*
- * xv6fs_destroy_inode - schedule an inode for freeing via RCU.
- *
- * Called by the VFS (via super_ops.destroy_inode).
- * Must NOT free immediately — other CPUs might still hold RCU references.
- *
- * API: call_rcu(&inode->i_rcu, callback)  — <linux/rcupdate.h>
- */
-void xv6fs_destroy_inode(struct inode *inode)
-{
-	call_rcu(&inode->i_rcu, xv6fs_i_callback);
 }
 
 /* ------------------------------------------------------------------
@@ -195,7 +189,43 @@ void xv6fs_release_dinodes(struct xv6fs_sb_info *sbi)
 /*
  * xv6fs_setattr - update inode attributes (size, mode, etc.).
  *
- * Called by chmod(2), chown(2), truncate(2), etc.
+ * Called by chmod(2), chown(2), truncate(2), utimes(2), etc.
+ * @iattr->ia_valid is a bitmask indicating which fields to change.
+ *
+ * Steps to implement:
+ *   1. Call setattr_prepare(idmap, dentry, iattr) to validate
+ *      permissions (e.g. only owner/root can chmod).  Return the
+ *      error if it fails.
+ *
+ *   2. If ia_valid & ATTR_SIZE (truncate):
+ *      a. Call truncate_setsize(inode, iattr->ia_size) — updates
+ *         inode->i_size and discards page-cache pages beyond new EOF.
+ *      b. Free data blocks beyond the new size:
+ *         - Walk ei->addrs[first_block .. XV6FS_NDIRECT-1], calling
+ *           xv6fs_bfree(sb, addr) on each non-zero entry and zeroing it.
+ *           first_block = DIV_ROUND_UP(iattr->ia_size, XV6FS_BSIZE).
+ *         - If ei->addrs[XV6FS_NDIRECT] != 0 (indirect block exists):
+ *           read the indirect block with sb_bread(), walk its entries
+ *           starting from the appropriate offset, xv6fs_bfree() each
+ *           non-zero entry.  If all entries are freed, free the
+ *           indirect block itself and zero ei->addrs[XV6FS_NDIRECT].
+ *         (Growing is handled lazily by xv6fs_get_block(create=1).)
+ *
+ *   3. Call setattr_copy(idmap, inode, iattr) — copies mode, uid, gid,
+ *      atime, mtime, ctime into the VFS inode.  These won't persist
+ *      on disk (xv6 has no fields for them) but work within a mount.
+ *
+ *   4. Call mark_inode_dirty(inode) — schedules writeback via
+ *      super_ops.write_inode → __xv6fs_write_inode(), which persists
+ *      the size change to disk.
+ *
+ * API hints:
+ *   setattr_prepare(idmap, dentry, iattr)  — <linux/fs.h>
+ *   truncate_setsize(inode, size)          — <linux/fs.h>
+ *   setattr_copy(idmap, inode, iattr)      — <linux/fs.h>
+ *   mark_inode_dirty(inode)                — <linux/fs.h>
+ *   xv6fs_bfree(sb, blockno)              — bmap.c
+ *   DIV_ROUND_UP(n, d)                    — <linux/math.h>
  *
  * VFS guarantees:
  *   - @dentry->d_inode is a valid, referenced inode.

@@ -359,7 +359,7 @@ extern const struct address_space_operations xv6fs_aops;
 int  xv6fs_init_inode_cache(void);
 void xv6fs_destroy_inode_cache(void);
 struct inode *xv6fs_alloc_inode(struct super_block *sb);
-void          xv6fs_destroy_inode(struct inode *inode);
+void          xv6fs_free_inode(struct inode *inode);
 struct inode *xv6fs_iget(struct super_block *sb, unsigned long ino);
 int  xv6fs_get_block(struct inode *inode, sector_t lblk,
 		     struct buffer_head *bh_result, int create);
