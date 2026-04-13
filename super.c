@@ -99,12 +99,29 @@ static int xv6fs_statfs(struct dentry *dentry, struct kstatfs *buf)
  * sb->s_op.
  * ---------------------------------------------------------------- */
 
+/*
+ * xv6fs_write_inode - write VFS inode metadata back to disk.
+ *
+ * Called by the VFS when an inode is marked dirty and needs to be
+ * flushed.  Delegates to __xv6fs_write_inode() in inode.c.
+ *
+ * VFS guarantees:
+ *   - @inode is a valid, referenced inode with I_DIRTY set.
+ *   - @wbc describes the writeback context (sync vs async).
+ */
+static int xv6fs_write_inode(struct inode *inode,
+			    struct writeback_control *wbc)
+{
+	/* TODO (stage 5) */
+	return -EROFS;
+}
+
 const struct super_operations xv6fs_super_ops = {
 	/* Memory management — implemented in inode.c */
 	.alloc_inode   = xv6fs_alloc_inode,
 	.destroy_inode = xv6fs_destroy_inode,
 
-	/* TODO: add .write_inode  when you implement write support (stage 5) */
+	.write_inode   = xv6fs_write_inode,
 
 	.put_super     = xv6fs_put_super,
 	.statfs        = xv6fs_statfs,

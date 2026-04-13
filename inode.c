@@ -121,8 +121,25 @@ void xv6fs_destroy_inode(struct inode *inode)
  * Populated with your implementations from the TODO sections below.
  * ---------------------------------------------------------------- */
 
+/*
+ * xv6fs_setattr - update inode attributes (size, mode, etc.).
+ *
+ * Called by chmod(2), chown(2), truncate(2), etc.
+ *
+ * VFS guarantees:
+ *   - @dentry->d_inode is a valid, referenced inode.
+ *   - @iattr describes which fields to change (ia_valid).
+ *   - i_rwsem is held by the caller.
+ */
+static int xv6fs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+			 struct iattr *iattr)
+{
+	/* TODO (stage 5) */
+	return -EROFS;
+}
+
 const struct inode_operations xv6fs_file_inode_ops = {
-	/* TODO (stage 5): add .setattr when you implement writes */
+	.setattr = xv6fs_setattr,
 };
 
 /* ------------------------------------------------------------------
@@ -442,9 +459,55 @@ static sector_t xv6fs_bmap(struct address_space *mapping, sector_t block)
 	return generic_block_bmap(mapping, block, xv6fs_get_block);
 }
 
+/*
+ * xv6fs_writepage - write a dirty page back to disk.
+ *
+ * VFS guarantees:
+ *   - @page is locked and dirty.
+ *   - @wbc describes the writeback context.
+ */
+static int xv6fs_writepage(struct page *page, struct writeback_control *wbc)
+{
+	/* TODO (stage 5) */
+	return block_write_full_page(page, xv6fs_get_block, wbc);
+}
+
+/*
+ * xv6fs_write_begin - prepare a page for buffered writing.
+ *
+ * VFS guarantees:
+ *   - @mapping is the file's address_space.
+ *   - @pos is the byte position in the file.
+ *   - @len is the number of bytes to be written.
+ *   - @pagep will receive the locked, up-to-date page.
+ */
+static int xv6fs_write_begin(struct file *file, struct address_space *mapping,
+			     loff_t pos, unsigned int len,
+			     struct page **pagep, void **fsdata)
+{
+	/* TODO (stage 5) */
+	return block_write_begin(mapping, pos, len, pagep, xv6fs_get_block);
+}
+
+/*
+ * xv6fs_write_end - finish a buffered write and mark the inode dirty.
+ *
+ * VFS guarantees:
+ *   - @page is the page returned by write_begin (locked).
+ *   - @copied is the number of bytes actually copied into the page.
+ */
+static int xv6fs_write_end(struct file *file, struct address_space *mapping,
+			   loff_t pos, unsigned int len, unsigned int copied,
+			   struct page *page, void *fsdata)
+{
+	/* TODO (stage 5) */
+	return generic_write_end(file, mapping, pos, len, copied, page, fsdata);
+}
+
 const struct address_space_operations xv6fs_aops = {
-	.read_folio = xv6fs_read_folio,
-	/* TODO (stage 5): .writepage / .writepages for write support     */
-	/* TODO (stage 5): .write_begin / .write_end for buffered writes  */
-	.bmap       = xv6fs_bmap,
+	.read_folio  = xv6fs_read_folio,
+	.writepage   = xv6fs_writepage,
+	.write_begin = xv6fs_write_begin,
+	.write_end   = xv6fs_write_end,
+	.bmap        = xv6fs_bmap,
 };

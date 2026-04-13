@@ -227,8 +227,84 @@ static struct dentry *xv6fs_lookup(struct inode *dir, struct dentry *dentry,
  *
  * Add .create, .mkdir, .unlink, .rmdir, .link in stage 5 (write support).
  */
+/*
+ * xv6fs_create - create a new regular file in a directory.
+ *
+ * VFS guarantees:
+ *   - @dir is a valid, referenced directory inode with i_rwsem held.
+ *   - @dentry is an unhashed negative dentry.
+ *   - @mode includes S_IFREG.
+ */
+static int xv6fs_create(struct mnt_idmap *idmap, struct inode *dir,
+			struct dentry *dentry, umode_t mode, bool excl)
+{
+	/* TODO (stage 5) */
+	return -EROFS;
+}
+
+/*
+ * xv6fs_mkdir - create a new directory.
+ *
+ * VFS guarantees:
+ *   - @dir is a valid, referenced directory inode with i_rwsem held.
+ *   - @dentry is an unhashed negative dentry.
+ *   - @mode includes S_IFDIR.
+ */
+static int xv6fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+		       struct dentry *dentry, umode_t mode)
+{
+	/* TODO (stage 5) */
+	return -EROFS;
+}
+
+/*
+ * xv6fs_unlink - remove a file from a directory.
+ *
+ * VFS guarantees:
+ *   - @dir is a valid directory inode with i_rwsem held exclusive.
+ *   - @dentry->d_inode is the target inode (non-NULL, referenced).
+ */
+static int xv6fs_unlink(struct inode *dir, struct dentry *dentry)
+{
+	/* TODO (stage 5) */
+	return -EROFS;
+}
+
+/*
+ * xv6fs_rmdir - remove an empty directory.
+ *
+ * VFS guarantees:
+ *   - @dir is the parent directory with i_rwsem held exclusive.
+ *   - @dentry->d_inode is the child directory (empty check is your job).
+ */
+static int xv6fs_rmdir(struct inode *dir, struct dentry *dentry)
+{
+	/* TODO (stage 5) */
+	return -EROFS;
+}
+
+/*
+ * xv6fs_link - create a hard link.
+ *
+ * VFS guarantees:
+ *   - @old_dentry->d_inode is the existing inode to link.
+ *   - @dir is the target directory with i_rwsem held exclusive.
+ *   - @dentry is the new name (unhashed negative dentry).
+ */
+static int xv6fs_link(struct dentry *old_dentry, struct inode *dir,
+		      struct dentry *dentry)
+{
+	/* TODO (stage 5) */
+	return -EROFS;
+}
+
 const struct inode_operations xv6fs_dir_inode_ops = {
 	.lookup = xv6fs_lookup,
+	.create = xv6fs_create,
+	.mkdir  = xv6fs_mkdir,
+	.unlink = xv6fs_unlink,
+	.rmdir  = xv6fs_rmdir,
+	.link   = xv6fs_link,
 };
 
 /*
