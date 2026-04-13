@@ -116,6 +116,77 @@ void xv6fs_destroy_inode(struct inode *inode)
 }
 
 /* ------------------------------------------------------------------
+ * inode in memory cache operations
+ * ---------------------------------------------------------------- */
+
+int xv6fs_load_dinodes(struct super_block *sb)
+{
+	struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
+	struct buffer_head *bh = NULL;
+	union xv6fs_dinode *dinodes = NULL;
+	int ret = 0;
+
+	dinodes = kvmalloc_array(sbi->raw_sb.ninodes, sizeof(union xv6fs_dinode), GFP_KERNEL | __GFP_ZERO);
+	if (!dinodes) {
+		pr_err("xv6fs: failed to allocate memory for in-memory dinodes\n");
+		return -ENOMEM;
+	}
+
+	sbi->dinodes = dinodes;
+	INIT_LIST_HEAD(&sbi->free_inodes_list);
+	sbi->free_inodes = 0;
+
+	for (__u32 i = 0; i < sbi->raw_sb.ninodes; i++) {
+		if (i % XV6FS_IPB == 0) {
+			if (bh) {
+				brelse(bh);
+			}
+			bh = sb_bread(sb, XV6FS_IBLOCK(i, sbi));
+			if (!bh) {
+				pr_err("xv6fs: failed to read inode block for inode %u\n", i);
+				ret = -EIO;
+				goto err_out;
+			}
+		}
+
+		union xv6fs_dinode *raw = (union xv6fs_dinode *)bh->b_data + XV6FS_IOFFSET(i);
+		if (raw->type == 0) {
+			// since it's 0, no need to consider endianness
+			list_add_tail(&sbi->dinodes[i].list, &sbi->free_inodes_list);
+			sbi->free_inodes++;
+		} else {
+			sbi->dinodes[i] = *raw;
+		}
+	}
+
+	if (bh) {
+		brelse(bh);
+	}
+
+	return 0;
+
+err_out:
+	if (bh) {
+		brelse(bh);
+	}
+	if (dinodes) {
+		kvfree(dinodes);
+		sbi->dinodes = NULL;
+		INIT_LIST_HEAD(&sbi->free_inodes_list);
+		sbi->free_inodes = 0;
+	}
+	return ret;
+}
+
+void xv6fs_release_dinodes(struct xv6fs_sb_info *sbi)
+{
+	kvfree(sbi->dinodes);
+	sbi->dinodes = NULL;
+	sbi->free_inodes = 0;
+	INIT_LIST_HEAD(&sbi->free_inodes_list);
+}
+
+/* ------------------------------------------------------------------
  * Inode operations table
  *
  * Populated with your implementations from the TODO sections below.
@@ -160,19 +231,7 @@ static int __xv6fs_read_inode(struct xv6fs_inode_info *ei)
 	struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
 	unsigned long ino = inode->i_ino;
 
-	// Read the block containing this inode
-	sector_t block = XV6FS_IBLOCK(ino, sbi);
-	struct buffer_head *bh = sb_bread(sb, block);
-	if (!bh) {
-		pr_err("xv6fs: failed to read inode block for inode %lu\n", ino);
-		return -EIO;
-	}
-
-	// Index into the block and convert to host-endian
-	struct xv6fs_dinode *raw = (struct xv6fs_dinode *)bh->b_data + XV6FS_IOFFSET(ino);
-	xv6fs_dinode_to_cpu(raw, ei);
-
-	brelse(bh);
+	xv6fs_dinode_to_cpu(&sbi->dinodes[ino], ei);
 	return 0;
 }
 
@@ -193,7 +252,10 @@ static int __xv6fs_write_inode(struct xv6fs_inode_info *ei)
 	struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
 	unsigned long ino = inode->i_ino;
 
-	// Read the block containing this inode
+	// Update in-memory cache
+	xv6fs_dinode_to_disk(ei, &sbi->dinodes[ino]);
+
+	// Write through to disk
 	sector_t block = XV6FS_IBLOCK(ino, sbi);
 	struct buffer_head *bh = sb_bread(sb, block);
 	if (!bh) {
@@ -201,9 +263,8 @@ static int __xv6fs_write_inode(struct xv6fs_inode_info *ei)
 		return -EIO;
 	}
 
-	// Convert to on-disk format and write back
-	struct xv6fs_dinode *raw = (struct xv6fs_dinode *)bh->b_data + XV6FS_IOFFSET(ino);
-	xv6fs_dinode_to_disk(ei, raw);
+	union xv6fs_dinode *raw = (union xv6fs_dinode *)bh->b_data + XV6FS_IOFFSET(ino);
+	*raw = sbi->dinodes[ino];
 
 	mark_buffer_dirty(bh);
 	brelse(bh);
@@ -225,7 +286,7 @@ static int __xv6fs_write_inode(struct xv6fs_inode_info *ei)
  *      a. Read the inode block: block = XV6FS_IBLOCK(ino, sbi)
  *         bh = sb_bread(sb, block)
  *      b. Index into the block:
- *         raw = (struct xv6fs_dinode *)bh->b_data + (ino % XV6FS_IPB)
+ *         raw = (union xv6fs_dinode *)bh->b_data + (ino % XV6FS_IPB)
  *      c. Copy fields into the VFS inode and xv6fs_inode_info:
  *           - set ei->i_type, ei->i_major, ei->i_minor  (le16_to_cpu)
  *           - copy ei->addrs[] (converting le32_to_cpu)
@@ -460,54 +521,50 @@ static sector_t xv6fs_bmap(struct address_space *mapping, sector_t block)
 }
 
 /*
- * xv6fs_writepage - write a dirty page back to disk.
- *
- * VFS guarantees:
- *   - @page is locked and dirty.
- *   - @wbc describes the writeback context.
+ * xv6fs_writepages - write dirty folios back to disk.
  */
-static int xv6fs_writepage(struct page *page, struct writeback_control *wbc)
+static int xv6fs_writepages(struct address_space *mapping,
+			    struct writeback_control *wbc)
 {
-	/* TODO (stage 5) */
-	return block_write_full_page(page, xv6fs_get_block, wbc);
+	return mpage_writepages(mapping, wbc, xv6fs_get_block);
 }
 
 /*
- * xv6fs_write_begin - prepare a page for buffered writing.
+ * xv6fs_write_begin - prepare a folio for buffered writing.
  *
  * VFS guarantees:
  *   - @mapping is the file's address_space.
  *   - @pos is the byte position in the file.
  *   - @len is the number of bytes to be written.
- *   - @pagep will receive the locked, up-to-date page.
+ *   - @foliop will receive the locked, up-to-date folio.
  */
 static int xv6fs_write_begin(struct file *file, struct address_space *mapping,
 			     loff_t pos, unsigned int len,
-			     struct page **pagep, void **fsdata)
+			     struct folio **foliop, void **fsdata)
 {
 	/* TODO (stage 5) */
-	return block_write_begin(mapping, pos, len, pagep, xv6fs_get_block);
+	return block_write_begin(mapping, pos, len, foliop, xv6fs_get_block);
 }
 
 /*
  * xv6fs_write_end - finish a buffered write and mark the inode dirty.
  *
  * VFS guarantees:
- *   - @page is the page returned by write_begin (locked).
- *   - @copied is the number of bytes actually copied into the page.
+ *   - @folio is the folio returned by write_begin (locked).
+ *   - @copied is the number of bytes actually copied into the folio.
  */
 static int xv6fs_write_end(struct file *file, struct address_space *mapping,
 			   loff_t pos, unsigned int len, unsigned int copied,
-			   struct page *page, void *fsdata)
+			   struct folio *folio, void *fsdata)
 {
 	/* TODO (stage 5) */
-	return generic_write_end(file, mapping, pos, len, copied, page, fsdata);
+	return generic_write_end(file, mapping, pos, len, copied, folio, fsdata);
 }
 
 const struct address_space_operations xv6fs_aops = {
-	.read_folio  = xv6fs_read_folio,
-	.writepage   = xv6fs_writepage,
-	.write_begin = xv6fs_write_begin,
-	.write_end   = xv6fs_write_end,
-	.bmap        = xv6fs_bmap,
+	.read_folio    = xv6fs_read_folio,
+	.writepages    = xv6fs_writepages,
+	.write_begin   = xv6fs_write_begin,
+	.write_end     = xv6fs_write_end,
+	.bmap          = xv6fs_bmap,
 };

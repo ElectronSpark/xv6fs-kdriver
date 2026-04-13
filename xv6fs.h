@@ -25,6 +25,7 @@
 #include <linux/fs.h>
 #include <linux/types.h>
 #include <linux/version.h>
+#include <linux/list.h>
 
 /* -----------------------------------------------------------------------
  * Constants
@@ -57,7 +58,7 @@
 #define XV6FS_T_DEV      3   /* device file */
 
 /** Number of on-disk inodes that fit in one block. */
-#define XV6FS_IPB        (XV6FS_BSIZE / sizeof(struct xv6fs_dinode))
+#define XV6FS_IPB        (XV6FS_BSIZE / sizeof(union xv6fs_dinode))
 
 /** Number of data-block bits tracked by one bitmap block. */
 #define XV6FS_BPB        (XV6FS_BSIZE * 8)
@@ -100,17 +101,23 @@ struct xv6fs_superblock {
 };
 
 /**
- * struct xv6fs_dinode - on-disk inode.
+ * union xv6fs_dinode - on-disk inode.
  *
  * Packed tightly; XV6FS_IPB of these fit in one XV6FS_BSIZE block.
  */
-struct xv6fs_dinode {
-	__le16 type;                      /* File type (XV6FS_T_*)              */
-	__le16 major;                     /* Device major (T_DEV only)          */
-	__le16 minor;                     /* Device minor (T_DEV only)          */
-	__le16 nlink;                     /* Number of hard links               */
-	__le32 size;                      /* File size in bytes                 */
-	__le32 addrs[XV6FS_NDIRECT + 1];  /* Direct block addrs + 1 indirect    */
+union xv6fs_dinode {
+	struct {
+		__le16 type;                      /* File type (XV6FS_T_*)              */
+		__le16 major;                     /* Device major (T_DEV only)          */
+		__le16 minor;                     /* Device minor (T_DEV only)          */
+		__le16 nlink;                     /* Number of hard links               */
+		__le32 size;                      /* File size in bytes                 */
+		__le32 addrs[XV6FS_NDIRECT + 1];  /* Direct block addrs + 1 indirect    */
+	};
+	struct {
+		__le16 type_padding;
+		struct list_head list; /* For free inode list in xv6fs_sb_info */
+	};
 };
 
 /**
@@ -137,6 +144,10 @@ struct xv6fs_dirent {
 struct xv6fs_sb_info {
 	struct xv6fs_superblock raw_sb;  /* Host-endian copy of the on-disk superblock */
 	struct buffer_head *bh;     /* Buffer head that holds the superblock block */
+	
+	union xv6fs_dinode *dinodes; /* In-memory copy of the inode blocks (array of xv6fs_dinode) */
+	struct list_head free_inodes_list; /* List of free inodes (for ialloc) */
+	__u32 free_inodes; 	 /* Count of free inodes (for bmap) */
 };
 
 /**
@@ -206,7 +217,7 @@ static inline struct xv6fs_sb_info *xv6fs_sb(struct super_block *sb)
  * The name field in xv6fs_dirent is a byte array and does not need
  * endian conversion, so only the @inum field is swapped.
  *
- * For struct xv6fs_dinode — ALL fields are converted:
+ * For union xv6fs_dinode — ALL fields are converted:
  *   __le16: type, major, minor, nlink
  *   __le32: size, addrs[0..XV6FS_NDIRECT]   (13 entries)
  *
@@ -223,7 +234,7 @@ static inline struct xv6fs_sb_info *xv6fs_sb(struct super_block *sb)
  * Does NOT set i_mode, i_op, i_fop —
  * the caller must do that based on ei->i_type after this returns.
  */
-static inline void xv6fs_dinode_to_cpu(const struct xv6fs_dinode *raw,
+static inline void xv6fs_dinode_to_cpu(const union xv6fs_dinode *raw,
 				       struct xv6fs_inode_info *ei)
 {
 	struct inode *inode = &ei->vfs_inode;
@@ -247,7 +258,7 @@ static inline void xv6fs_dinode_to_cpu(const struct xv6fs_dinode *raw,
  * Converts every field including nlink and size from ei->vfs_inode.
  */
 static inline void xv6fs_dinode_to_disk(const struct xv6fs_inode_info *ei,
-					struct xv6fs_dinode *raw)
+					union xv6fs_dinode *raw)
 {
 	const struct inode *inode = &ei->vfs_inode;
 	int i;
@@ -352,6 +363,8 @@ void          xv6fs_destroy_inode(struct inode *inode);
 struct inode *xv6fs_iget(struct super_block *sb, unsigned long ino);
 int  xv6fs_get_block(struct inode *inode, sector_t lblk,
 		     struct buffer_head *bh_result, int create);
+int xv6fs_load_dinodes(struct super_block *sb);
+void xv6fs_release_dinodes(struct xv6fs_sb_info *sbi);
 
 /* dir.c */
 extern const struct inode_operations xv6fs_dir_inode_ops;
@@ -359,5 +372,10 @@ extern const struct file_operations  xv6fs_dir_fops;
 
 /* file.c */
 extern const struct file_operations xv6fs_file_fops;
+
+/* bmap.c */
+long xv6fs_b_count_free(struct super_block *sb);
+long xv6fs_balloc(struct super_block *sb);
+void xv6fs_bfree(struct super_block *sb, sector_t b);
 
 #endif /* _XV6FS_H */

@@ -48,6 +48,7 @@ void xv6fs_release_sbi(struct xv6fs_sb_info *sbi)
  * ---------------------------------------------------------------- */
 static void xv6fs_put_super(struct super_block *sb)
 {
+	xv6fs_release_dinodes(xv6fs_sb(sb));
 	xv6fs_release_sbi(xv6fs_sb(sb));
 	sb->s_fs_info = NULL;
 	pr_info("xv6fs: superblock released for device %s\n", sb->s_id);
@@ -236,6 +237,10 @@ int xv6fs_fill_super(struct super_block *sb, void *data, int silent)
 
 	pr_info("xv6fs: superblock populated: max file size = %lld bytes\n", sb->s_maxbytes);
 
+	ret = xv6fs_load_dinodes(sb);
+	if (ret)
+		goto cleanup_sbi;
+
 	struct inode *rooti = xv6fs_iget(sb, XV6FS_ROOTINO);
 	if (IS_ERR(rooti)) {
 		pr_err("xv6fs: failed to get root inode\n");
@@ -258,6 +263,7 @@ int xv6fs_fill_super(struct super_block *sb, void *data, int silent)
 
 cleanup_sbi:
 	if (ret != 0) {
+		xv6fs_release_dinodes(sbi);
 		sb->s_fs_info = NULL;
 		xv6fs_release_sbi(sbi);
 		sbi = NULL;
