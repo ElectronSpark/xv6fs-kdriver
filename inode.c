@@ -16,6 +16,8 @@
 #include <linux/buffer_head.h>
 #include <linux/mpage.h>
 #include <linux/slab.h>
+#include <linux/statfs.h>
+#include <linux/fs.h>
 #include "xv6fs.h"
 
 /* ------------------------------------------------------------------
@@ -216,7 +218,7 @@ void xv6fs_release_dinodes(struct xv6fs_sb_info *sbi)
  *      on disk (xv6 has no fields for them) but work within a mount.
  *
  *   4. Call mark_inode_dirty(inode) — schedules writeback via
- *      super_ops.write_inode → __xv6fs_write_inode(), which persists
+ *      super_ops.write_inode → xv6fs_write_inode(), which persists
  *      the size change to disk.
  *
  * API hints:
@@ -232,11 +234,86 @@ void xv6fs_release_dinodes(struct xv6fs_sb_info *sbi)
  *   - @iattr describes which fields to change (ia_valid).
  *   - i_rwsem is held by the caller.
  */
+/*
+ * xv6fs_truncate_blocks - free data blocks beyond @new_blocks.
+ *
+ * Walks ei->addrs[] from @new_blocks up to XV6FS_NDIRECT-1 freeing
+ * direct blocks, then handles the indirect block entries starting
+ * from the appropriate offset.  If all indirect entries end up freed,
+ * the indirect block itself is freed too.
+ *
+ * Called with i_rwsem held by the VFS (via setattr / evict_inode).
+ */
+static void xv6fs_truncate_blocks(struct inode *inode, sector_t new_blocks)
+{
+	struct xv6fs_inode_info *ei = xv6fs_i(inode);
+	struct super_block *sb = inode->i_sb;
+	sector_t i;
+
+	/* Free direct blocks */
+	for (i = new_blocks; i < XV6FS_NDIRECT; i++) {
+		if (ei->addrs[i]) {
+			xv6fs_bfree(sb, ei->addrs[i]);
+			ei->addrs[i] = 0;
+		}
+	}
+
+	/* Free indirect block entries */
+	if (ei->addrs[XV6FS_NDIRECT] == 0)
+		return;
+
+	struct buffer_head *ind_bh = sb_bread(sb, ei->addrs[XV6FS_NDIRECT]);
+	if (!ind_bh) {
+		pr_err("xv6fs: failed to read indirect block for inode %lu\n",
+		       inode->i_ino);
+		return;
+	}
+
+	__le32 *ind_data = (__le32 *)ind_bh->b_data;
+	sector_t ind_start = (new_blocks > XV6FS_NDIRECT) ?
+			     new_blocks - XV6FS_NDIRECT : 0;
+	bool any_left = false;
+
+	for (i = 0; i < XV6FS_NINDIRECT; i++) {
+		__u32 addr = le32_to_cpu(ind_data[i]);
+		if (addr == 0)
+			continue;
+		if (i >= ind_start) {
+			xv6fs_bfree(sb, addr);
+			ind_data[i] = 0;
+		} else {
+			any_left = true;
+		}
+	}
+
+	mark_buffer_dirty(ind_bh);
+	brelse(ind_bh);
+
+	if (!any_left) {
+		xv6fs_bfree(sb, ei->addrs[XV6FS_NDIRECT]);
+		ei->addrs[XV6FS_NDIRECT] = 0;
+	}
+}
+
 static int xv6fs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			 struct iattr *iattr)
 {
-	/* TODO (stage 5) */
-	return -EROFS;
+	int ret = setattr_prepare(idmap, dentry, iattr);
+	if (ret != 0) {
+		return ret;
+	}
+
+	struct inode *inode = dentry->d_inode;
+
+	if (iattr->ia_valid & ATTR_SIZE) {
+		truncate_setsize(inode, iattr->ia_size);
+		xv6fs_truncate_blocks(inode,
+			DIV_ROUND_UP(iattr->ia_size, XV6FS_BSIZE));
+	}
+
+	setattr_copy(idmap, inode, iattr);
+	mark_inode_dirty(inode);
+	return 0;
 }
 
 const struct inode_operations xv6fs_file_inode_ops = {
@@ -262,42 +339,6 @@ static int __xv6fs_read_inode(struct xv6fs_inode_info *ei)
 	unsigned long ino = inode->i_ino;
 
 	xv6fs_dinode_to_cpu(&sbi->dinodes[ino], ei);
-	return 0;
-}
-
-/* ------------------------------------------------------------------
- * __xv6fs_write_inode - write VFS inode metadata back to disk.
- *
- * Reads the block containing inode @ino, converts the in-memory
- * xv6fs_inode_info and VFS inode fields back to on-disk format using
- * xv6fs_dinode_to_disk(), overwrites the slot, and marks the buffer
- * dirty.  Does NOT handle indirect block mapping or data blocks.
- *
- * Returns 0 on success, -EIO if the block cannot be read.
- * ---------------------------------------------------------------- */
-static int __xv6fs_write_inode(struct xv6fs_inode_info *ei)
-{
-	struct inode *inode = &ei->vfs_inode;
-	struct super_block *sb = inode->i_sb;
-	struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
-	unsigned long ino = inode->i_ino;
-
-	// Update in-memory cache
-	xv6fs_dinode_to_disk(ei, &sbi->dinodes[ino]);
-
-	// Write through to disk
-	sector_t block = XV6FS_IBLOCK(ino, sbi);
-	struct buffer_head *bh = sb_bread(sb, block);
-	if (!bh) {
-		pr_err("xv6fs: failed to read inode block for inode %lu\n", ino);
-		return -EIO;
-	}
-
-	union xv6fs_dinode *raw = (union xv6fs_dinode *)bh->b_data + XV6FS_IOFFSET(ino);
-	*raw = sbi->dinodes[ino];
-
-	mark_buffer_dirty(bh);
-	brelse(bh);
 	return 0;
 }
 
@@ -466,36 +507,81 @@ int xv6fs_get_block(struct inode *inode, sector_t lblk,
 		    struct buffer_head *bh_result, int create)
 {
 	struct xv6fs_inode_info *ei = xv6fs_i(inode);
+	struct super_block *sb = inode->i_sb;
+	long new_block = 0;
 
 	if (lblk < XV6FS_NDIRECT) {
 		// Direct block
 		sector_t disk_block = ei->addrs[lblk];
 		if (disk_block == 0) {
-			// Hole
+			if (!create)
+				return 0;
+			new_block = xv6fs_balloc(sb);
+			if (new_block < 0)
+				return new_block;
+			ei->addrs[lblk] = new_block;
+			mark_inode_dirty(inode);
+			map_bh(bh_result, sb, new_block);
+			set_buffer_new(bh_result);
 			return 0;
 		}
-		map_bh(bh_result, inode->i_sb, disk_block);
+		map_bh(bh_result, sb, disk_block);
 		return 0;
 	} else if (lblk < XV6FS_NDIRECT + XV6FS_NINDIRECT) {
 		sector_t ind_block = ei->addrs[XV6FS_NDIRECT];
+		bool new_indirect = false;
 		if (ind_block == 0) {
-			// Hole (no indirect block)
-			return 0;
+			if (!create)
+				return 0;
+			new_block = xv6fs_balloc(sb);
+			if (new_block < 0)
+				return new_block;
+			ei->addrs[XV6FS_NDIRECT] = new_block;
+			mark_inode_dirty(inode);
+			ind_block = new_block;
+			new_indirect = true;
 		}
-		struct buffer_head *ind_bh = sb_bread(inode->i_sb, ind_block);
-		if (!ind_bh) {
-			pr_err("xv6fs: failed to read indirect block for inode %lu\n",
-			       inode->i_ino);
-			return -EIO;
+
+		struct buffer_head *ind_bh;
+		if (new_indirect) {
+			ind_bh = sb_getblk(sb, ind_block);
+			if (!ind_bh)
+				return -EIO;
+			memset(ind_bh->b_data, 0, XV6FS_BSIZE);
+			set_buffer_uptodate(ind_bh);
+			mark_buffer_dirty(ind_bh);
+		} else {
+			ind_bh = sb_bread(sb, ind_block);
+			if (!ind_bh) {
+				pr_err("xv6fs: failed to read indirect block for inode %lu\n",
+				       inode->i_ino);
+				return -EIO;
+			}
 		}
+
 		__le32 *ind_data = (__le32 *)ind_bh->b_data;
 		sector_t disk_block = le32_to_cpu(ind_data[lblk - XV6FS_NDIRECT]);
-		brelse(ind_bh);
 		if (disk_block == 0) {
-			// Hole
+			if (!create) {
+				brelse(ind_bh);
+				return 0;
+			}
+			new_block = xv6fs_balloc(sb);
+			if (new_block < 0) {
+				brelse(ind_bh);
+				return new_block;
+			}
+			ind_data[lblk - XV6FS_NDIRECT] = cpu_to_le32(new_block);
+			mark_buffer_dirty(ind_bh);
+			mark_inode_dirty(inode);
+			disk_block = new_block;
+			brelse(ind_bh);
+			map_bh(bh_result, sb, disk_block);
+			set_buffer_new(bh_result);
 			return 0;
 		}
-		map_bh(bh_result, inode->i_sb, disk_block);
+		brelse(ind_bh);
+		map_bh(bh_result, sb, disk_block);
 		return 0;
 	}
 

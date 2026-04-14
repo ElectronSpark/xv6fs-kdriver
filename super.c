@@ -15,6 +15,8 @@
 #include <linux/buffer_head.h>
 #include <linux/slab.h>
 #include <linux/statfs.h>
+#include <linux/writeback.h>
+#include <linux/fs.h>
 #include "xv6fs.h"
 
 void xv6fs_release_sbi(struct xv6fs_sb_info *sbi)
@@ -84,10 +86,10 @@ static int xv6fs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_type = sbi->raw_sb.magic;
 	buf->f_bsize = XV6FS_BSIZE;
 	buf->f_blocks = sbi->raw_sb.nblocks;
-	buf->f_bfree = 0;
-	buf->f_bavail = 0;
+	buf->f_bfree = xv6fs_b_count_free(sb);
+	buf->f_bavail = xv6fs_b_count_free(sb);
 	buf->f_files = sbi->raw_sb.ninodes;
-	buf->f_ffree = 0;
+	buf->f_ffree = sbi->free_inodes;
 	buf->f_namelen = XV6FS_DIRSIZ;
 	buf->f_flags = ST_NOATIME | ST_NODIRATIME | ST_NOEXEC | ST_NOSUID | ST_RDONLY;
 	return 0;
@@ -103,18 +105,76 @@ static int xv6fs_statfs(struct dentry *dentry, struct kstatfs *buf)
 /*
  * xv6fs_write_inode - write VFS inode metadata back to disk.
  *
- * Called by the VFS when an inode is marked dirty and needs to be
- * flushed.  Delegates to __xv6fs_write_inode() in inode.c.
+ * Called by the VFS writeback machinery when an inode has been marked
+ * dirty (via mark_inode_dirty()) and the kernel decides it's time to
+ * flush it — either during periodic writeback, sync(2), fsync(2), or
+ * when evicting the inode from the cache.
+ *
+ * Steps to implement:
+ *   1. Get the xv6fs_inode_info from the VFS inode:
+ *        struct xv6fs_inode_info *ei = xv6fs_i(inode);
+ *
+ *   2. Call __xv6fs_write_inode(ei) (defined in inode.c) to:
+ *      a. Convert in-memory fields back to on-disk format via
+ *         xv6fs_dinode_to_disk() into sbi->dinodes[ino].
+ *      b. Read the disk block containing this inode with sb_bread().
+ *      c. Copy the dinode into the correct slot in the block.
+ *      d. mark_buffer_dirty(bh) + brelse(bh).
+ *
+ *   3. If @wbc->sync_mode == WB_SYNC_ALL (e.g. fsync), the buffer
+ *      must reach disk before returning.  __xv6fs_write_inode already
+ *      calls mark_buffer_dirty(); for sync writes, additionally call
+ *      sync_dirty_buffer(bh) instead — this submits I/O and waits.
+ *      (For the initial implementation, mark_buffer_dirty is fine;
+ *      the block layer will flush eventually.  sync_dirty_buffer can
+ *      be added later for fsync correctness.)
+ *
+ *   4. Return 0 on success, or the error from __xv6fs_write_inode.
+ *
+ * API hints:
+ *   xv6fs_i(inode)                       — xv6fs.h
+ *   sync_dirty_buffer(bh)                — <linux/buffer_head.h>
  *
  * VFS guarantees:
  *   - @inode is a valid, referenced inode with I_DIRTY set.
  *   - @wbc describes the writeback context (sync vs async).
+ *   - The VFS does NOT hold i_rwsem for this call.
+ *   - May be called concurrently for different inodes.
  */
 static int xv6fs_write_inode(struct inode *inode,
 			    struct writeback_control *wbc)
 {
-	/* TODO (stage 5) */
-	return -EROFS;
+	struct xv6fs_inode_info *ei = xv6fs_i(inode);
+	struct super_block *sb = inode->i_sb;
+	struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
+	unsigned long ino = inode->i_ino;
+	int ret = 0;
+
+	// Update in-memory cache
+	xv6fs_dinode_to_disk(ei, &sbi->dinodes[ino]);
+
+	// Write through to disk
+	sector_t block = XV6FS_IBLOCK(ino, sbi);
+	struct buffer_head *bh = sb_bread(sb, block);
+	if (!bh) {
+		pr_err("xv6fs: failed to read inode block for inode %lu\n", ino);
+		return -EIO;
+	}
+
+	union xv6fs_dinode *raw = (union xv6fs_dinode *)bh->b_data + XV6FS_IOFFSET(ino);
+	*raw = sbi->dinodes[ino];
+
+	mark_buffer_dirty(bh);
+	if (wbc->sync_mode == WB_SYNC_ALL) {
+		ret = sync_dirty_buffer(bh);
+		if (ret) {
+			pr_err("xv6fs: failed to sync buffer for inode %lu: %d\n", ino, ret);
+			brelse(bh);
+			return ret;
+		}
+	}
+	brelse(bh);
+	return 0;
 }
 
 /*

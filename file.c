@@ -65,13 +65,13 @@
  */
 static ssize_t xv6fs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
-	/* TODO (stage 5) */
-	return -EROFS;
+	return generic_file_write_iter(iocb, from);
 }
 
 const struct file_operations xv6fs_file_fops = {
 	.read_iter  = generic_file_read_iter,
 	.write_iter = xv6fs_file_write_iter,
+	.fsync      = generic_file_fsync,
 	.mmap       = generic_file_mmap,
 	.llseek     = generic_file_llseek,
 };
