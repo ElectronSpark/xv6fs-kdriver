@@ -202,8 +202,32 @@ static int xv6fs_write_inode(struct inode *inode,
  */
 static void xv6fs_evict_inode(struct inode *inode)
 {
-	/* TODO (stage 5) */
+	struct xv6fs_sb_info *sbi = xv6fs_sb(inode->i_sb);
+	unsigned long ino = inode->i_ino;
+
 	truncate_inode_pages_final(&inode->i_data);
+
+	if (!inode->i_nlink && ino > 0) {
+		inode->i_size = 0;
+		xv6fs_truncate_blocks(inode, 0);
+
+		/* Zero on-disk inode */
+		sector_t block = XV6FS_IBLOCK(ino, sbi);
+		struct buffer_head *bh = sb_bread(inode->i_sb, block);
+		if (bh) {
+			union xv6fs_dinode *raw = (union xv6fs_dinode *)bh->b_data
+				+ XV6FS_IOFFSET(ino);
+			memset(raw, 0, sizeof(*raw));
+			mark_buffer_dirty(bh);
+			brelse(bh);
+		}
+
+		/* Return dinode to free list */
+		memset(&sbi->dinodes[ino], 0, sizeof(union xv6fs_dinode));
+		list_add_tail(&sbi->dinodes[ino].list, &sbi->free_inodes_list);
+		sbi->free_inodes++;
+	}
+
 	clear_inode(inode);
 }
 

@@ -365,6 +365,8 @@ int  xv6fs_get_block(struct inode *inode, sector_t lblk,
 		     struct buffer_head *bh_result, int create);
 int xv6fs_load_dinodes(struct super_block *sb);
 void xv6fs_release_dinodes(struct xv6fs_sb_info *sbi);
+struct inode *xv6fs_new_inode(struct inode *dir, umode_t mode);
+void xv6fs_truncate_blocks(struct inode *inode, sector_t new_blocks);
 
 /* dir.c */
 extern const struct inode_operations xv6fs_dir_inode_ops;

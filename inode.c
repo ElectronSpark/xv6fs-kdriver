@@ -244,7 +244,7 @@ void xv6fs_release_dinodes(struct xv6fs_sb_info *sbi)
  *
  * Called with i_rwsem held by the VFS (via setattr / evict_inode).
  */
-static void xv6fs_truncate_blocks(struct inode *inode, sector_t new_blocks)
+void xv6fs_truncate_blocks(struct inode *inode, sector_t new_blocks)
 {
 	struct xv6fs_inode_info *ei = xv6fs_i(inode);
 	struct super_block *sb = inode->i_sb;
@@ -684,3 +684,61 @@ const struct address_space_operations xv6fs_aops = {
 	.write_end     = xv6fs_write_end,
 	.bmap          = xv6fs_bmap,
 };
+
+/* ------------------------------------------------------------------
+ * xv6fs_new_inode — allocate a fresh VFS inode backed by a free dinode.
+ * ---------------------------------------------------------------- */
+struct inode *xv6fs_new_inode(struct inode *dir, umode_t mode)
+{
+	struct super_block *sb = dir->i_sb;
+	struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
+	struct inode *inode;
+	struct xv6fs_inode_info *ei;
+	union xv6fs_dinode *di;
+	unsigned long ino;
+
+	if (list_empty(&sbi->free_inodes_list))
+		return ERR_PTR(-ENOSPC);
+
+	inode = new_inode(sb);
+	if (!inode)
+		return ERR_PTR(-ENOMEM);
+
+	di = list_first_entry(&sbi->free_inodes_list, union xv6fs_dinode, list);
+	ino = di - sbi->dinodes;
+	list_del_init(&di->list);
+	sbi->free_inodes--;
+
+	inode->i_ino = ino;
+	inode->i_blocks = 0;
+	inode->i_size = 0;
+	inode->i_uid = make_kuid(&init_user_ns, 1000);
+	inode->i_gid = make_kgid(&init_user_ns, 1000);
+	inode_set_atime(inode, 0, 0);
+	inode_set_mtime(inode, 0, 0);
+	inode_set_ctime(inode, 0, 0);
+
+	ei = xv6fs_i(inode);
+	memset(ei->addrs, 0, sizeof(ei->addrs));
+	ei->i_major = 0;
+	ei->i_minor = 0;
+
+	if (S_ISDIR(mode)) {
+		ei->i_type = XV6FS_T_DIR;
+		inode->i_mode = S_IFDIR | 0755;
+		inode->i_op = &xv6fs_dir_inode_ops;
+		inode->i_fop = &xv6fs_dir_fops;
+		set_nlink(inode, 2);
+	} else {
+		ei->i_type = XV6FS_T_FILE;
+		inode->i_mode = S_IFREG | 0644;
+		inode->i_op = &xv6fs_file_inode_ops;
+		inode->i_fop = &xv6fs_file_fops;
+		inode->i_mapping->a_ops = &xv6fs_aops;
+		set_nlink(inode, 1);
+	}
+
+	insert_inode_hash(inode);
+	mark_inode_dirty(inode);
+	return inode;
+}
