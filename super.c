@@ -89,7 +89,7 @@ static int xv6fs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_bfree = xv6fs_b_count_free(sb);
 	buf->f_bavail = xv6fs_b_count_free(sb);
 	buf->f_files = sbi->raw_sb.ninodes;
-	buf->f_ffree = sbi->free_inodes;
+	buf->f_ffree = READ_ONCE(sbi->free_inodes);
 	buf->f_namelen = XV6FS_DIRSIZ;
 	buf->f_flags = ST_NOATIME | ST_NODIRATIME | ST_NOEXEC | ST_NOSUID;
 	return 0;
@@ -223,9 +223,11 @@ static void xv6fs_evict_inode(struct inode *inode)
 		}
 
 		/* Return dinode to free list */
+		xv6fs_ilist_lock(sbi);
 		memset(&sbi->dinodes[ino], 0, sizeof(union xv6fs_dinode));
 		list_add_tail(&sbi->dinodes[ino].list, &sbi->free_inodes_list);
 		sbi->free_inodes++;
+		xv6fs_ilist_unlock(sbi);
 	}
 
 	clear_inode(inode);
@@ -369,6 +371,8 @@ int xv6fs_fill_super(struct super_block *sb, void *data, int silent)
 		ret = -ENOMEM;
 		goto cleanup_sbi;
 	}
+
+	spin_lock_init(&sbi->ilist_lock);
 
 	pr_info("xv6fs: mounted superblock with %u blocks, %u inodes\n",
 		sbi->raw_sb.size, sbi->raw_sb.ninodes);

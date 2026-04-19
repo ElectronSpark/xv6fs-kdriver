@@ -114,7 +114,6 @@ void xv6fs_free_inode(struct inode *inode)
 /* ------------------------------------------------------------------
  * inode in memory cache operations
  * ---------------------------------------------------------------- */
-
 int xv6fs_load_dinodes(struct super_block *sb)
 {
 	struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
@@ -148,6 +147,7 @@ int xv6fs_load_dinodes(struct super_block *sb)
 		union xv6fs_dinode *raw = (union xv6fs_dinode *)bh->b_data + XV6FS_IOFFSET(i);
 		if (raw->type == 0) {
 			// since it's 0, no need to consider endianness
+			// This function is called at init time, no need to lock
 			list_add_tail(&sbi->dinodes[i].list, &sbi->free_inodes_list);
 			sbi->free_inodes++;
 		} else {
@@ -697,17 +697,29 @@ struct inode *xv6fs_new_inode(struct inode *dir, umode_t mode)
 	union xv6fs_dinode *di;
 	unsigned long ino;
 
-	if (list_empty(&sbi->free_inodes_list))
+	/* Reserve a free dinode first (cheap, doesn't sleep). */
+	xv6fs_ilist_lock(sbi);
+	if (list_empty(&sbi->free_inodes_list)) {
+		xv6fs_ilist_unlock(sbi);
 		return ERR_PTR(-ENOSPC);
-
-	inode = new_inode(sb);
-	if (!inode)
-		return ERR_PTR(-ENOMEM);
-
-	di = list_first_entry(&sbi->free_inodes_list, union xv6fs_dinode, list);
-	ino = di - sbi->dinodes;
+	}
+	di = list_first_entry(&sbi->free_inodes_list,
+			      union xv6fs_dinode, list);
 	list_del_init(&di->list);
 	sbi->free_inodes--;
+	xv6fs_ilist_unlock(sbi);
+
+	ino = di - sbi->dinodes;
+
+	/* Allocate the VFS inode (may sleep). */
+	inode = new_inode(sb);
+	if (!inode) {
+		xv6fs_ilist_lock(sbi);
+		list_add(&di->list, &sbi->free_inodes_list);
+		sbi->free_inodes++;
+		xv6fs_ilist_unlock(sbi);
+		return ERR_PTR(-ENOMEM);
+	}
 
 	inode->i_ino = ino;
 	inode->i_blocks = 0;

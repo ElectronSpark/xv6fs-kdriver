@@ -145,6 +145,7 @@ struct xv6fs_sb_info {
 	struct xv6fs_superblock raw_sb;  /* Host-endian copy of the on-disk superblock */
 	struct buffer_head *bh;     /* Buffer head that holds the superblock block */
 	
+	spinlock_t ilist_lock;	/* Protects the free inodes list and free_inodes count */
 	union xv6fs_dinode *dinodes; /* In-memory copy of the inode blocks (array of xv6fs_dinode) */
 	struct list_head free_inodes_list; /* List of free inodes (for ialloc) */
 	__u32 free_inodes; 	 /* Count of free inodes (for bmap) */
@@ -330,6 +331,17 @@ static inline void xv6fs_sb_to_disk(const struct xv6fs_superblock *host,
 	disk->inodestart = cpu_to_le32(host->inodestart);
 	disk->bmapstart  = cpu_to_le32(host->bmapstart);
 }
+
+static inline void xv6fs_ilist_lock(struct xv6fs_sb_info *sbi)
+{
+	spin_lock(&sbi->ilist_lock);
+}
+
+static inline void xv6fs_ilist_unlock(struct xv6fs_sb_info *sbi)
+{
+	spin_unlock(&sbi->ilist_lock);
+}
+
 
 /* -----------------------------------------------------------------------
  * Kernel-version compatibility shims

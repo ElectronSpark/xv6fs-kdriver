@@ -20,7 +20,7 @@ long xv6fs_b_count_free(struct super_block *sb) {
             pr_err("xv6fs: failed to read bitmap block for bit %llu\n", bstart);
             return -EIO;
         }
-        non_data_blocks = bitmap_weight_le((const unsigned long *)bh->b_data, dstart - bstart);
+        non_data_blocks = bitmap_weight((const unsigned long *)bh->b_data, dstart - bstart);
     }
 
     for (__u64 b = bstart; b < total; b += XV6FS_BPB) {
@@ -33,7 +33,7 @@ long xv6fs_b_count_free(struct super_block *sb) {
         }
 
         __u64 bits = min_t(__u64, XV6FS_BPB, total - b);
-        used += bitmap_weight_le((const unsigned long *)bh->b_data, bits);
+        used += bitmap_weight((const unsigned long *)bh->b_data, bits);
         brelse(bh);
         bh = NULL;
     }
@@ -52,6 +52,7 @@ long xv6fs_balloc(struct super_block *sb) {
             return -EIO;
         }
 
+        lock_buffer(bh);
         __u64 bits = min_t(__u64, XV6FS_BPB, total - b);
         __u64 offset = b < XV6FS_BPB ? XV6FS_DSTART(sbi) : 0;
         unsigned long *bitmap = (unsigned long *)bh->b_data;
@@ -60,10 +61,12 @@ long xv6fs_balloc(struct super_block *sb) {
         if (bit < bits) {
             set_bit_le(bit, bitmap);
             mark_buffer_dirty(bh);
+            unlock_buffer(bh);
             brelse(bh);
             return b + bit;
         }
 
+        unlock_buffer(bh);
         brelse(bh);
     }
 
@@ -89,8 +92,10 @@ void xv6fs_bfree(struct super_block *sb, sector_t b) {
         pr_err("xv6fs: failed to read bitmap block for bit %llu\n", (unsigned long long)b);
         return;
     }
+    lock_buffer(bh);
     clear_bit_le(XV6FS_BOFFSET(b), (unsigned long *)bh->b_data);
     mark_buffer_dirty(bh);
+    unlock_buffer(bh);
     brelse(bh);
 }
 
