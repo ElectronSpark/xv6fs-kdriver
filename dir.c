@@ -346,8 +346,10 @@ static int xv6fs_dir_add_entry(struct inode *dir, const struct qstr *name,
 
 	if (buffer_new(&map_bh)) {
 		bh = sb_getblk(dir->i_sb, map_bh.b_blocknr);
-		if (!bh)
+		if (!bh) {
+			xv6fs_bfree(dir->i_sb, map_bh.b_blocknr);
 			return -EIO;
+		}
 		memset(bh->b_data, 0, XV6FS_BSIZE);
 		set_buffer_uptodate(bh);
 	} else {
@@ -469,7 +471,6 @@ static int xv6fs_unlink(struct inode *dir, struct dentry *dentry)
 	release_dir_cursor(&cursor);
 
 	inode_dec_link_count(inode);
-	mark_inode_dirty(dir);
 	return 0;
 }
 
@@ -495,6 +496,9 @@ static int xv6fs_link(struct dentry *old_dentry, struct inode *dir,
 {
 	struct inode *inode = d_inode(old_dentry);
 	int err;
+
+	if (S_ISDIR(inode->i_mode))
+		return -EPERM;
 
 	if (inode->i_nlink >= 65535)
 		return -EMLINK;

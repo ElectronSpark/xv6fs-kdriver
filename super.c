@@ -91,7 +91,7 @@ static int xv6fs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_files = sbi->raw_sb.ninodes;
 	buf->f_ffree = sbi->free_inodes;
 	buf->f_namelen = XV6FS_DIRSIZ;
-	buf->f_flags = ST_NOATIME | ST_NODIRATIME | ST_NOEXEC | ST_NOSUID | ST_RDONLY;
+	buf->f_flags = ST_NOATIME | ST_NODIRATIME | ST_NOEXEC | ST_NOSUID;
 	return 0;
 }
 

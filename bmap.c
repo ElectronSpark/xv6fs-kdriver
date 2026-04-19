@@ -8,21 +8,37 @@
 long xv6fs_b_count_free(struct super_block *sb) {
     struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
     __u64 total = sbi->raw_sb.size;
+    __u64 dstart = XV6FS_DSTART(sbi);
+    __u64 bstart = round_down(dstart, XV6FS_BPB);
+    __u64 non_data_blocks = 0;
     int used = 0;
+    struct buffer_head *bh = NULL;
 
-    for (__u64 b = 0; b < total; b += XV6FS_BPB) {
-        struct buffer_head *bh = sb_bread(sb, XV6FS_BBLOCK(b, sbi));
+    if (dstart % XV6FS_BPB != 0) {
+        bh = sb_bread(sb, XV6FS_BBLOCK(bstart, sbi));
         if (!bh) {
-            pr_err("xv6fs: failed to read bitmap block for bit %u\n", b);
+            pr_err("xv6fs: failed to read bitmap block for bit %llu\n", bstart);
+            return -EIO;
+        }
+        non_data_blocks = bitmap_weight_le((const unsigned long *)bh->b_data, dstart - bstart);
+    }
+
+    for (__u64 b = bstart; b < total; b += XV6FS_BPB) {
+        if (!bh) {
+            bh = sb_bread(sb, XV6FS_BBLOCK(b, sbi));
+        }
+        if (!bh) {
+            pr_err("xv6fs: failed to read bitmap block for bit %llu\n", b);
             return -EIO;
         }
 
         __u64 bits = min_t(__u64, XV6FS_BPB, total - b);
-        used += bitmap_weight((const unsigned long *)bh->b_data, bits);
+        used += bitmap_weight_le((const unsigned long *)bh->b_data, bits);
         brelse(bh);
+        bh = NULL;
     }
 
-    return total - used;
+    return total - used - dstart + non_data_blocks;
 }
 
 long xv6fs_balloc(struct super_block *sb) {
@@ -32,16 +48,17 @@ long xv6fs_balloc(struct super_block *sb) {
     for (__u64 b = 0; b < total; b += XV6FS_BPB) {
         struct buffer_head *bh = sb_bread(sb, XV6FS_BBLOCK(b, sbi));
         if (!bh) {
-            pr_err("xv6fs: failed to read bitmap block for bit %u\n", b);
+            pr_err("xv6fs: failed to read bitmap block for bit %llu\n", b);
             return -EIO;
         }
 
         __u64 bits = min_t(__u64, XV6FS_BPB, total - b);
+        __u64 offset = b < XV6FS_BPB ? XV6FS_DSTART(sbi) : 0;
         unsigned long *bitmap = (unsigned long *)bh->b_data;
-        __u64 bit = find_first_zero_bit(bitmap, bits);
+        __u64 bit = find_next_zero_bit_le(bitmap, bits, offset);
 
         if (bit < bits) {
-            set_bit(bit, bitmap);
+            set_bit_le(bit, bitmap);
             mark_buffer_dirty(bh);
             brelse(bh);
             return b + bit;
@@ -56,12 +73,23 @@ long xv6fs_balloc(struct super_block *sb) {
 void xv6fs_bfree(struct super_block *sb, sector_t b) {
     struct xv6fs_sb_info *sbi = xv6fs_sb(sb);
     __u64 total = sbi->raw_sb.size;
-    struct buffer_head *bh = sb_bread(sb, XV6FS_BBLOCK(b, sbi));
-    if (!bh) {
-        pr_err("xv6fs: failed to read bitmap block for bit %lu\n", (unsigned long)b);
+
+    if (b >= total) {
+        pr_err("xv6fs: block number %llu out of range (total blocks: %llu)\n", (unsigned long long)b, total);
         return;
     }
-    clear_bit(XV6FS_IOFFSET(b), (unsigned long *)bh->b_data);
+
+    if (b < XV6FS_DSTART(sbi)) {
+        pr_err("xv6fs: block number %llu is reserved for metadata and cannot be freed\n", (unsigned long long)b);
+        return;
+    }
+
+    struct buffer_head *bh = sb_bread(sb, XV6FS_BBLOCK(b, sbi));
+    if (!bh) {
+        pr_err("xv6fs: failed to read bitmap block for bit %llu\n", (unsigned long long)b);
+        return;
+    }
+    clear_bit_le(XV6FS_BOFFSET(b), (unsigned long *)bh->b_data);
     mark_buffer_dirty(bh);
     brelse(bh);
 }

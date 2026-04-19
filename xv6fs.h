@@ -193,12 +193,10 @@ static inline struct xv6fs_sb_info *xv6fs_sb(struct super_block *sb)
 
 /** Block number of the bitmap block that tracks data block @b. */
 #define XV6FS_BBLOCK(b, sbi)    ((b) / XV6FS_BPB + (sbi)->raw_sb.bmapstart)
+#define XV6FS_BOFFSET(b)        ((b) % XV6FS_BPB)
 
 /** Block number of the first data block (bmapstart + nbitmap). */
 #define XV6FS_DSTART(sbi)  ((sbi)->raw_sb.bmapstart + (sbi)->raw_sb.size / XV6FS_BPB + 1)
-
-/** Block number of the data block corresponding to the logical block @d in a file. */
-#define XV6FS_DBLOCK(d, sbi)   ((d) + XV6FS_DSTART(sbi))
 
 /* -----------------------------------------------------------------------
  * Endian-conversion helpers
